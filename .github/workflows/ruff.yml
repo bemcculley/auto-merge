@@ -1,0 +1,37 @@
+name: Lint / Format (ruff)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+jobs:
+  ruff:
+    name: Ruff lint and format check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: |
+            pyproject.toml
+            uv.lock
+
+      - name: Install ruff
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff
+
+      - name: Check formatting (ruff format --check)
+        run: |
+          ruff format --check --diff .
+
+      - name: Lint (ruff check)
+        run: |
+          ruff check --output-format=github .
