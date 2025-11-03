@@ -2,7 +2,6 @@ import time
 import logging
 from typing import Tuple
 
-from .config import SETTINGS
 from .github import GitHubClient
 from .models import Config
 from .metrics import (
