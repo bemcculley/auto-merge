@@ -146,6 +146,21 @@ def process_item(gh: GitHubClient, owner: str, repo: str, number: int) -> Tuple[
                 if not ok:
                     logger.debug("PR #%s still not mergeable after update: %s", number, reason)
                     return False, f"not_mergeable_after_update:{reason}"
+        # If checks are not green (including race where checks haven't registered yet), wait and re-evaluate
+        elif reason == "checks_not_green" and pr:
+            head_sha = pr.get("head", {}).get("sha")
+            logger.debug("Checks not green for PR #%s; waiting up to %sm for checks to pass", number, cfg.max_wait_minutes)
+            with checks_wait_seconds.time():
+                ok_checks = wait_for_checks(gh, owner, repo, head_sha, cfg)
+            if not ok_checks:
+                logger.debug("Checks timeout for PR #%s without branch update", number)
+                return False, "checks_timeout"
+            logger.debug("Re-evaluating PR #%s after checks became green", number)
+            with worker_processing_seconds.labels(phase="evaluate", owner=owner, repo=repo).time():
+                ok, reason, pr = evaluate_mergeability(gh, owner, repo, number, cfg)
+                if not ok:
+                    logger.debug("PR #%s still not mergeable after checks: %s", number, reason)
+                    return False, f"not_mergeable_after_checks:{reason}"
         else:
             return False, reason
 

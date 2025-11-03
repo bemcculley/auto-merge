@@ -94,12 +94,23 @@ label: automerge
 merge_method: squash  # one of: squash | rebase | merge
 require_up_to_date: true
 update_branch: true
+# Require all branch checks to pass before merging. If your repo has no checks at all,
+# the worker will wait up to max_wait_minutes for checks to appear, then proceed only
+# when they pass. You can explicitly opt-out (unsafe) by setting allow_merge_when_no_checks: true.
+allow_merge_when_no_checks: false
 max_wait_minutes: 60
 poll_interval_seconds: 10
 # Available template vars: {number}, {title}, {body}, {head}, {base}, {user}
 title_template: "{title} (#{number})"
 body_template: "{body}\n\nAuto-merged by Auto Merge Bot for PR #{number}"
 ```
+
+Behavior notes:
+- The worker evaluates combined commit status and check suites. All must be green/neutral.
+- Race-safe: if the `automerge` label is applied immediately after a push and no checks are yet present,
+  the worker treats this as pending and waits (polling every `poll_interval_seconds`) up to `max_wait_minutes`.
+  It re-evaluates on each poll and merges only when checks turn green. If the timeout elapses, it stops and
+  will be retriggered by subsequent webhook events (e.g., `check_suite`, `status`).
 
 ### Webhook service environment variables
 
