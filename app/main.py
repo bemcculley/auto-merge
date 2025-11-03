@@ -214,6 +214,18 @@ async def webhook(
     event = x_github_event or "unknown"
     action = "unknown"
     code = 200
+    # Debug log minimal, no payloads or secrets
+    if logger.isEnabledFor(logging.DEBUG):
+        try:
+            logger.debug(
+                "webhook.received: event=%s delivery=%s content_length=%s",
+                event,
+                x_github_delivery,
+                request.headers.get("content-length") or request.headers.get("Content-Length"),
+            )
+        except Exception:
+            # Never fail request due to logging
+            pass
     body = await request.body()
 
     # Verify signature (resolve secret at request-time to honor test env overrides)

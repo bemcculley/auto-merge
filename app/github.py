@@ -1,5 +1,6 @@
 import time
 import base64
+import logging
 from typing import Any, Dict, Optional, Tuple, List
 import httpx
 import jwt
@@ -15,6 +16,24 @@ from .metrics import (
     throttles_total,
 )
 from .queue import Queue
+
+logger = logging.getLogger(__name__)
+
+
+def _safe_url(url: str) -> str:
+    try:
+        u = httpx.URL(url)
+        # remove query to avoid leaking params
+        return str(u.copy_with(query=None))
+    except Exception:
+        return url.split("?", 1)[0]
+
+
+def _param_keys(d: Optional[Dict[str, Any]]) -> List[str]:
+    try:
+        return sorted(list((d or {}).keys()))
+    except Exception:
+        return []
 
 
 class GitHubClient:
@@ -47,12 +66,31 @@ class GitHubClient:
         }
         endpoint = "POST /app/installations/{id}/access_tokens"
         start = time.perf_counter()
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "github.request: method=POST path=%s installation=%s phase=token_exchange",
+                _safe_url(url),
+                self.installation_id,
+            )
         resp = httpx.post(url, headers=headers, timeout=30)
-        github_api_latency_seconds.labels(endpoint=endpoint).observe(time.perf_counter() - start)
+        duration = time.perf_counter() - start
+        github_api_latency_seconds.labels(endpoint=endpoint).observe(duration)
         github_api_requests_total.labels(endpoint=endpoint, status=str(resp.status_code)).inc()
+        if logger.isEnabledFor(logging.DEBUG):
+            rl_rem = resp.headers.get("X-RateLimit-Remaining")
+            rl_reset = resp.headers.get("X-RateLimit-Reset")
+            logger.debug(
+                "github.response: method=POST path=%s status=%s duration_ms=%d installation=%s rl_remaining=%s rl_reset=%s phase=token_exchange",
+                _safe_url(url),
+                resp.status_code,
+                int(duration * 1000),
+                self.installation_id,
+                rl_rem,
+                rl_reset,
+            )
         resp.raise_for_status()
         data = resp.json()
-        self._token = data["token"]
+        self._token = data.get("token")
         expires_at = data.get("expires_at")  # e.g., 2024-01-01T00:00:00Z
         if expires_at:
             dt = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
@@ -97,6 +135,15 @@ class GitHubClient:
             start = time.perf_counter()
             exc: Optional[Exception] = None
             resp: Optional[httpx.Response] = None
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "github.request: method=%s path=%s installation=%s params=%s attempt=%s",
+                    method.upper(),
+                    _safe_url(url),
+                    self.installation_id,
+                    _param_keys(params),
+                    attempts,
+                )
             try:
                 resp = httpx.request(method, url, headers=self._headers(), params=params, json=data, timeout=60)
             except (httpx.TimeoutException, httpx.TransportError) as e:
@@ -107,6 +154,32 @@ class GitHubClient:
             github_api_requests_total.labels(endpoint=endpoint, status=status_label).inc()
             if resp is not None:
                 self._handle_rate_limit(resp)
+            # Log response or exception
+            if logger.isEnabledFor(logging.DEBUG):
+                if resp is not None:
+                    rl_rem = resp.headers.get("X-RateLimit-Remaining")
+                    rl_reset = resp.headers.get("X-RateLimit-Reset")
+                    logger.debug(
+                        "github.response: method=%s path=%s status=%s duration_ms=%d installation=%s rl_remaining=%s rl_reset=%s attempt=%s",
+                        method.upper(),
+                        _safe_url(url),
+                        resp.status_code,
+                        int(duration * 1000),
+                        self.installation_id,
+                        rl_rem,
+                        rl_reset,
+                        attempts,
+                    )
+                else:
+                    logger.debug(
+                        "github.response_error: method=%s path=%s error=%s duration_ms=%d installation=%s attempt=%s",
+                        method.upper(),
+                        _safe_url(url),
+                        exc,
+                        int(duration * 1000),
+                        self.installation_id,
+                        attempts,
+                    )
             if not should_retry(resp, exc) or attempts >= 3:
                 if exc is not None:
                     # Synthesize a Response-like object on exception by raising or return a dummy response
@@ -119,6 +192,15 @@ class GitHubClient:
                 SETTINGS.backoff_base_seconds * (SETTINGS.backoff_factor ** (attempts - 1)),
                 SETTINGS.max_backoff_seconds,
             )
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "github.retry: method=%s path=%s sleep_seconds=%s attempt=%s installation=%s",
+                    method.upper(),
+                    _safe_url(url),
+                    sleep_s,
+                    attempts,
+                    self.installation_id,
+                )
             time.sleep(sleep_s)
         # If we exit loop due to exception after retries, raise it
         if last_exc:
