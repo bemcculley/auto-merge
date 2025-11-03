@@ -76,7 +76,9 @@ class Settings:
         self.max_item_window_seconds = int(os.getenv("MAX_ITEM_WINDOW_SECONDS", "900"))  # 15 minutes default
 
     def redis_key(self, *parts: str) -> str:
-        return f"{self.redis_namespace}:" + ":".join(parts)
+        # Read namespace from environment at call time to honor test overrides
+        ns = os.getenv("REDIS_NAMESPACE", self.redis_namespace) or self.redis_namespace
+        return f"{ns}:" + ":".join(parts)
 
 
 SETTINGS = Settings()

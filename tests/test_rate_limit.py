@@ -34,6 +34,15 @@ def _bypass_headers(monkeypatch):
 
 
 def test_429_triggers_throttle(monkeypatch):
+    # Patch time.sleep to avoid real waiting but verify it was invoked (backoff path exercised)
+    sleep_calls = {"count": 0, "args": []}
+
+    def _fake_sleep(s):
+        sleep_calls["count"] += 1
+        sleep_calls["args"].append(s)
+        return None
+
+    monkeypatch.setattr(time, "sleep", _fake_sleep)
     calls = {}
 
     class FakeQueue:
@@ -69,9 +78,20 @@ def test_429_triggers_throttle(monkeypatch):
     assert calls["set"]["installation_id"] == 42
     # reason comes from 429 branch: "retry_after"
     assert calls["set"]["reason"] in ("retry_after", "rate_limit")
+    # Ensure backoff path exercised (sleep invoked at least once)
+    assert sleep_calls["count"] >= 1
 
 
 def test_403_secondary_triggers_throttle(monkeypatch):
+    # Patch time.sleep to avoid real waiting but verify it was invoked (backoff path exercised)
+    sleep_calls = {"count": 0, "args": []}
+
+    def _fake_sleep(s):
+        sleep_calls["count"] += 1
+        sleep_calls["args"].append(s)
+        return None
+
+    monkeypatch.setattr(time, "sleep", _fake_sleep)
     calls = {}
 
     class FakeQueue:

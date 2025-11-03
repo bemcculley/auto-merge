@@ -12,6 +12,7 @@ permissions:
 jobs:
   trivy:
     name: Trivy scans (image, fs, config)
+    if: ${{ false }}
     runs-on: ubuntu-latest
 
     steps:

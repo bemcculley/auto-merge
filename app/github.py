@@ -161,7 +161,7 @@ class GitHubClient:
                     and "secondary"
                     in (
                         resp.json().get("message", "").lower()
-                        if resp.headers.get("content-type", " ").startswith("application/json")
+                        if (resp.headers.get("content-type") or resp.headers.get("Content-Type") or " ").lower().startswith("application/json")
                         else ""
                     )
                     else ("primary" if status != 429 else "retry_after")
