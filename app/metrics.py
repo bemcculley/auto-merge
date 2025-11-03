@@ -134,6 +134,13 @@ github_api_requests_total = Counter(
     labelnames=("endpoint", "status"),
     registry=REGISTRY,
 )
+
+github_installation_token_exchanges_total = Counter(
+    "github_installation_token_exchanges_total",
+    "Installation access tokens minted (per installation)",
+    labelnames=("installation",),
+    registry=REGISTRY,
+)
 github_api_latency_seconds = Histogram(
     "github_api_latency_seconds",
     "Latency of GitHub API requests",

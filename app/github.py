@@ -1,6 +1,7 @@
 import time
 import base64
 import logging
+import threading
 from typing import Any, Dict, Optional, Tuple, List
 import httpx
 import jwt
@@ -14,6 +15,7 @@ from .metrics import (
     github_rate_limit_remaining,
     github_rate_limit_reset,
     throttles_total,
+    github_installation_token_exchanges_total,
 )
 from .queue import Queue
 
@@ -37,6 +39,11 @@ def _param_keys(d: Optional[Dict[str, Any]]) -> List[str]:
 
 
 class GitHubClient:
+    # Shared in-memory cache per installation to avoid minting tokens too often
+    _tok_cache: dict[int, tuple[str, float]] = {}
+    _tok_locks: dict[int, threading.Lock] = {}
+    _global_lock = threading.Lock()
+
     def __init__(self, installation_id: int):
         self.installation_id = installation_id
         self._token: Optional[str] = None
@@ -56,47 +63,82 @@ class GitHubClient:
         return jwt.encode(payload, self.private_key_pem, algorithm="RS256")
 
     def _ensure_token(self) -> None:
-        if self._token and time.time() < self._token_expiry - 60:
+        # Try instance cache first with a small safety margin
+        now = time.time()
+        safety_margin = 120  # seconds
+        if self._token and now < self._token_expiry - safety_margin:
             return
-        jwt_ = self._app_jwt()
-        url = f"{self.base_url}/app/installations/{self.installation_id}/access_tokens"
-        headers = {
-            "Authorization": f"Bearer {jwt_}",
-            "Accept": "application/vnd.github+json",
-        }
-        endpoint = "POST /app/installations/{id}/access_tokens"
-        start = time.perf_counter()
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(
-                "github.request: method=POST path=%s installation=%s phase=token_exchange",
-                _safe_url(url),
-                self.installation_id,
-            )
-        resp = httpx.post(url, headers=headers, timeout=30)
-        duration = time.perf_counter() - start
-        github_api_latency_seconds.labels(endpoint=endpoint).observe(duration)
-        github_api_requests_total.labels(endpoint=endpoint, status=str(resp.status_code)).inc()
-        if logger.isEnabledFor(logging.DEBUG):
-            rl_rem = resp.headers.get("X-RateLimit-Remaining")
-            rl_reset = resp.headers.get("X-RateLimit-Reset")
-            logger.debug(
-                "github.response: method=POST path=%s status=%s duration_ms=%d installation=%s rl_remaining=%s rl_reset=%s phase=token_exchange",
-                _safe_url(url),
-                resp.status_code,
-                int(duration * 1000),
-                self.installation_id,
-                rl_rem,
-                rl_reset,
-            )
-        resp.raise_for_status()
-        data = resp.json()
-        self._token = data.get("token")
-        expires_at = data.get("expires_at")  # e.g., 2024-01-01T00:00:00Z
-        if expires_at:
-            dt = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
-            self._token_expiry = dt.timestamp()
-        else:
-            self._token_expiry = time.time() + 3600
+        # Try shared cache
+        cached = self._tok_cache.get(self.installation_id)
+        if cached:
+            tok, exp = cached
+            if now < exp - safety_margin:
+                self._token, self._token_expiry = tok, exp
+                return
+        # Lock per installation to avoid concurrent refreshes
+        with self._global_lock:
+            lock = self._tok_locks.get(self.installation_id)
+            if lock is None:
+                lock = threading.Lock()
+                self._tok_locks[self.installation_id] = lock
+        with lock:
+            # Double-check cache after acquiring lock
+            cached2 = self._tok_cache.get(self.installation_id)
+            if cached2:
+                tok2, exp2 = cached2
+                if now < exp2 - safety_margin:
+                    self._token, self._token_expiry = tok2, exp2
+                    return
+            # Mint new token
+            jwt_ = self._app_jwt()
+            url = f"{self.base_url}/app/installations/{self.installation_id}/access_tokens"
+            headers = {
+                "Authorization": f"Bearer {jwt_}",
+                "Accept": "application/vnd.github+json",
+            }
+            endpoint = "POST /app/installations/{id}/access_tokens"
+            start = time.perf_counter()
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "github.request: method=POST path=%s installation=%s phase=token_exchange",
+                    _safe_url(url),
+                    self.installation_id,
+                )
+            resp = httpx.post(url, headers=headers, timeout=30)
+            duration = time.perf_counter() - start
+            github_api_latency_seconds.labels(endpoint=endpoint).observe(duration)
+            github_api_requests_total.labels(endpoint=endpoint, status=str(resp.status_code)).inc()
+            if logger.isEnabledFor(logging.DEBUG):
+                rl_rem = resp.headers.get("X-RateLimit-Remaining")
+                rl_reset = resp.headers.get("X-RateLimit-Reset")
+                logger.debug(
+                    "github.response: method=POST path=%s status=%s duration_ms=%d installation=%s rl_remaining=%s rl_reset=%s phase=token_exchange",
+                    _safe_url(url),
+                    resp.status_code,
+                    int(duration * 1000),
+                    self.installation_id,
+                    rl_rem,
+                    rl_reset,
+                )
+            resp.raise_for_status()
+            data = resp.json()
+            token = data.get("token")
+            expires_at = data.get("expires_at")  # e.g., 2024-01-01T00:00:00Z
+            if expires_at:
+                dt = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+                exp_ts = dt.timestamp()
+            else:
+                exp_ts = time.time() + 3600
+            self._tok_cache[self.installation_id] = (token, exp_ts)
+            self._token, self._token_expiry = token, exp_ts
+            github_installation_token_exchanges_total.labels(installation=str(self.installation_id)).inc()
+            if logger.isEnabledFor(logging.DEBUG):
+                secs = int(max(0, exp_ts - time.time()))
+                logger.debug(
+                    "github.token_refreshed: installation=%s expires_in_seconds=%s",
+                    self.installation_id,
+                    secs,
+                )
 
     def _headers(self) -> Dict[str, str]:
         self._ensure_token()

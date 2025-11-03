@@ -183,6 +183,8 @@ async def _drain_repo(q: Queue, installation_id: int, owner: str, repo: str):
                     )
                 # Release lock and exit; a subsequent webhook or scheduled re-run will resume
                 return
+        # Use a single GitHubClient per drain session so the installation token is reused
+        gh = GitHubClient(installation_id)
         # Drain until empty
         while True:
             item = q.pop(installation_id, owner, repo)
@@ -192,7 +194,6 @@ async def _drain_repo(q: Queue, installation_id: int, owner: str, repo: str):
             number = int(item.get("number"))
             start_ts = time.time()
             logger.debug("Processing queued PR #%s for %s/%s", number, owner, repo)
-            gh = GitHubClient(installation_id)
             try:
                 # Heartbeat function to refresh the per-repo lock during long waits
                 def _heartbeat() -> None:
