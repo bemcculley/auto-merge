@@ -1,0 +1,90 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auto-merge-webhook
+  labels:
+    app: auto-merge-webhook
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: auto-merge-webhook
+  template:
+    metadata:
+      labels:
+        app: auto-merge-webhook
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+        - name: app
+          image: auto-merge-webhook:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: APP_ID
+              valueFrom:
+                secretKeyRef:
+                  name: auto-merge-secrets
+                  key: APP_ID
+            - name: APP_PRIVATE_KEY
+              value: /var/run/auto-merge/app-private-key.pem
+            - name: WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: auto-merge-secrets
+                  key: WEBHOOK_SECRET
+            - name: REDIS_URL
+              value: redis://redis:6379/0
+            - name: REDIS_NAMESPACE
+              value: automerge
+            - name: REDIS_LOCK_TTL_SECONDS
+              value: "60"
+            - name: REDIS_HEARTBEAT_SECONDS
+              value: "15"
+            - name: GITHUB_API_URL
+              value: https://api.github.com
+            - name: SERVICE_VERSION
+              value: k8s
+          volumeMounts:
+            - name: app-private-key
+              mountPath: /var/run/auto-merge
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+      volumes:
+        - name: app-private-key
+          secret:
+            secretName: auto-merge-secrets
+            items:
+              - key: app-private-key.pem
+                path: app-private-key.pem
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: auto-merge-webhook
+  labels:
+    app: auto-merge-webhook
+spec:
+  selector:
+    app: auto-merge-webhook
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP
