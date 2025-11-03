@@ -86,3 +86,40 @@ def test_worker_process_item_behind_then_update_merge(monkeypatch):
     assert ok is True
     assert ("update_branch", 11) in gh.calls
     assert any(c[0] == "merge" for c in gh.calls)
+
+
+class GHNoChecks(GHBase):
+    def __init__(self):
+        super().__init__()
+        self.pr = {
+            "number": 12,
+            "labels": [{"name": "automerge"}],
+            "mergeable_state": "clean",
+            "mergeable": True,
+            "head": {"sha": "nochk", "ref": "feat3"},
+            "base": {"ref": "main"},
+            "title": "docs: no checks",
+            "user": {"login": "dev"},
+        }
+
+    def get_pr(self, owner, repo, number):
+        return self.pr
+
+    def get_combined_status(self, owner, repo, sha):
+        # Simulate no statuses (GitHub returns an array); also state might be 'pending'
+        return {"state": "pending", "statuses": []}
+
+    def list_check_suites(self, owner, repo, sha):
+        # No suites
+        return []
+
+    def merge_pr(self, owner, repo, number, method, title, body):
+        self.calls.append(("merge", method))
+        return True, "merged"
+
+
+def test_worker_merges_when_no_checks_allowed():
+    gh = GHNoChecks()
+    ok, msg = process_item(gh, "octo", "repo", 12)
+    assert ok is True
+    assert any(c[0] == "merge" for c in gh.calls)

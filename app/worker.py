@@ -1,4 +1,5 @@
 import time
+import logging
 from typing import Tuple
 
 from .config import SETTINGS
@@ -12,6 +13,8 @@ from .metrics import (
     merges_success_total,
     merges_failed_total,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def parse_simple_yaml(text: str) -> dict:
@@ -52,13 +55,23 @@ def load_config(gh: GitHubClient, owner: str, repo: str) -> Config:
     return cfg
 
 
-def are_checks_green(gh: GitHubClient, owner: str, repo: str, sha: str) -> bool:
+def are_checks_green(gh: GitHubClient, owner: str, repo: str, sha: str, cfg: Config) -> bool:
     combined = gh.get_combined_status(owner, repo, sha)
-    if combined.get("state") not in ("success", "neutral"):
-        return False
     suites = gh.list_check_suites(owner, repo, sha)
+    statuses = combined.get("statuses") or []
+    # If there are no statuses and no check suites, allow merge when configured
+    if not statuses and not suites:
+        logger.debug("No statuses and no check suites for %s/%s@%s; allow_merge_when_no_checks=%s", owner, repo, sha, cfg.allow_merge_when_no_checks)
+        return bool(cfg.allow_merge_when_no_checks)
+    # Otherwise require green/neutral across combined status and suites
+    state = combined.get("state")
+    if state not in ("success", "neutral"):
+        logger.debug("Combined status not green: state=%s for %s/%s@%s", state, owner, repo, sha)
+        return False
     for s in suites:
-        if s.get("conclusion") not in ("success", "neutral"):
+        concl = s.get("conclusion")
+        if concl not in ("success", "neutral"):
+            logger.debug("Check suite not green: conclusion=%s for %s/%s@%s", concl, owner, repo, sha)
             return False
     return True
 
@@ -83,7 +96,8 @@ def evaluate_mergeability(gh: GitHubClient, owner: str, repo: str, number: int, 
         return False, f"behind_or_blocked:{mergeable_state}", pr
 
     # Checks must be green
-    if not are_checks_green(gh, owner, repo, head_sha):
+    if not are_checks_green(gh, owner, repo, head_sha, cfg):
+        logger.debug("Checks not green for %s/%s PR #%s (sha=%s)", owner, repo, number, head_sha)
         return False, "checks_not_green", pr
 
     if pr.get("mergeable") is False:
@@ -95,34 +109,43 @@ def evaluate_mergeability(gh: GitHubClient, owner: str, repo: str, number: int, 
 def wait_for_checks(gh: GitHubClient, owner: str, repo: str, sha: str, cfg: Config) -> bool:
     deadline = time.time() + cfg.max_wait_minutes * 60
     while time.time() < deadline:
-        if are_checks_green(gh, owner, repo, sha):
+        if are_checks_green(gh, owner, repo, sha, cfg):
             return True
         time.sleep(max(5, cfg.poll_interval_seconds))
     return False
 
 
 def process_item(gh: GitHubClient, owner: str, repo: str, number: int) -> Tuple[bool, str]:
+    logger.debug("Loading config for %s/%s", owner, repo)
     cfg = load_config(gh, owner, repo)
+    logger.debug("Evaluating PR #%s for %s/%s with cfg=%s", number, owner, repo, cfg.model_dump())
     # Evaluate
     with worker_processing_seconds.labels(phase="evaluate", owner=owner, repo=repo).time():
         ok, reason, pr = evaluate_mergeability(gh, owner, repo, number, cfg)
     if not ok:
+        logger.debug("PR #%s not mergeable initially: reason=%s", number, reason)
         # If behind and updates allowed, try to update then wait and re-evaluate
         if cfg.update_branch and pr and pr.get("mergeable_state") in ("behind",):
+            logger.debug("Attempting update-branch for PR #%s", number)
             with worker_processing_seconds.labels(phase="update_branch", owner=owner, repo=repo).time():
                 updated = gh.update_branch(owner, repo, number)
             branch_updates_total.labels(result="success" if updated else "fail").inc()
+            logger.debug("Update-branch result for PR #%s: %s", number, updated)
             if not updated:
                 return False, f"update_branch_failed:{reason}"
             # Wait for checks
             head_sha = pr.get("head", {}).get("sha")
             with checks_wait_seconds.time():
-                if not wait_for_checks(gh, owner, repo, head_sha, cfg):
-                    return False, "checks_timeout"
+                ok_checks = wait_for_checks(gh, owner, repo, head_sha, cfg)
+            if not ok_checks:
+                logger.debug("Checks timeout after update for PR #%s", number)
+                return False, "checks_timeout"
             # Re-evaluate
+            logger.debug("Re-evaluating PR #%s after branch update", number)
             with worker_processing_seconds.labels(phase="evaluate", owner=owner, repo=repo).time():
                 ok, reason, pr = evaluate_mergeability(gh, owner, repo, number, cfg)
                 if not ok:
+                    logger.debug("PR #%s still not mergeable after update: %s", number, reason)
                     return False, f"not_mergeable_after_update:{reason}"
         else:
             return False, reason
@@ -144,11 +167,14 @@ def process_item(gh: GitHubClient, owner: str, repo: str, number: int) -> Tuple[
         base=pr.get("base", {}).get("ref"),
         user=(pr.get("user") or {}).get("login"),
     )
+    logger.debug("Merging PR #%s for %s/%s with method=%s", number, owner, repo, method)
     with worker_processing_seconds.labels(phase="merge", owner=owner, repo=repo).time():
         ok, msg = gh.merge_pr(owner, repo, number, method, title, body)
     merge_attempts_total.labels(method=method, result="success" if ok else "error").inc()
     if ok:
+        logger.debug("Merge success for PR #%s: %s", number, msg)
         merges_success_total.labels(method=method).inc()
     else:
+        logger.debug("Merge failure for PR #%s: %s", number, msg)
         merges_failed_total.labels(reason="merge_api_error").inc()
     return ok, msg

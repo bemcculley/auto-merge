@@ -5,6 +5,7 @@ import os
 import uuid
 import asyncio
 import time
+import logging
 from typing import Any, Dict, Optional
 from fastapi import FastAPI, Request, Response, Header, HTTPException
 
@@ -18,6 +19,8 @@ from .metrics import (
 from .queue import Queue
 from .github import GitHubClient
 from .worker import process_item
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Auto Merge Webhook Service", version=os.getenv("SERVICE_VERSION", "dev"))
 
@@ -105,7 +108,9 @@ def extract_pr_identities(event: str, payload: Dict[str, Any]) -> Optional[list[
 
 async def _drain_repo(q: Queue, installation_id: int, owner: str, repo: str):
     worker_id = str(uuid.uuid4())
+    logger.debug("Drain start for %s/%s (installation=%s, worker_id=%s)", owner, repo, installation_id, worker_id)
     if not q.acquire_lock(installation_id, owner, repo, worker_id):
+        logger.debug("Drain skipped: failed to acquire lock for %s/%s", owner, repo)
         return
     try:
         # Respect rate-limit backpressure per installation
@@ -120,6 +125,7 @@ async def _drain_repo(q: Queue, installation_id: int, owner: str, repo: str):
                 # Schedule a resume after cooldown, up to max_backoff_seconds
                 delay = min(max(0.0, until - now), SETTINGS.max_backoff_seconds)
                 if delay > 0:
+                    logger.debug("Backpressure active; deferring drain for %ss (installation=%s)", delay, installation_id)
                     asyncio.create_task(asyncio.sleep(delay))
                     # Release lock and exit; a subsequent webhook or scheduled re-run will resume
                 return
@@ -127,19 +133,24 @@ async def _drain_repo(q: Queue, installation_id: int, owner: str, repo: str):
         while True:
             item = q.pop(installation_id, owner, repo)
             if not item:
+                logger.debug("Queue empty for %s/%s; stopping drain", owner, repo)
                 break
             number = int(item.get("number"))
+            logger.debug("Processing queued PR #%s for %s/%s", number, owner, repo)
             gh = GitHubClient(installation_id)
             ok, msg = process_item(gh, owner, repo, number)
+            logger.debug("Result for PR #%s: ok=%s msg=%s", number, ok, msg)
             # Continue regardless; processing result is logged via metrics
             # Sleep briefly to avoid hot looping
             await asyncio.sleep(0)
             # Refresh lock periodically
             if not q.refresh_lock(installation_id, owner, repo, worker_id):
                 # Lost the lock; stop to avoid double processing
+                logger.debug("Lost lock while draining %s/%s; stopping", owner, repo)
                 break
     finally:
         q.release_lock(installation_id, owner, repo, worker_id)
+        logger.debug("Drain finished for %s/%s (worker_id=%s)", owner, repo, worker_id)
 
 
 @app.post("/webhook")
