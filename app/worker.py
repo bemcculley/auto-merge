@@ -43,7 +43,9 @@ def parse_simple_yaml(text: str) -> dict:
 
 def load_config(gh: GitHubClient, owner: str, repo: str) -> Config:
     # Read .github/automerge.yml or .yaml
-    content = gh.load_repo_file(owner, repo, ".github/automerge.yml") or gh.load_repo_file(owner, repo, ".github/automerge.yaml")
+    content = gh.load_repo_file(owner, repo, ".github/automerge.yml") or gh.load_repo_file(
+        owner, repo, ".github/automerge.yaml"
+    )
     user = {}
     if content:
         try:
@@ -61,7 +63,13 @@ def are_checks_green(gh: GitHubClient, owner: str, repo: str, sha: str, cfg: Con
     statuses = combined.get("statuses") or []
     # If there are no statuses and no check suites, allow merge when configured
     if not statuses and not suites:
-        logger.debug("No statuses and no check suites for %s/%s@%s; allow_merge_when_no_checks=%s", owner, repo, sha, cfg.allow_merge_when_no_checks)
+        logger.debug(
+            "No statuses and no check suites for %s/%s@%s; allow_merge_when_no_checks=%s",
+            owner,
+            repo,
+            sha,
+            cfg.allow_merge_when_no_checks,
+        )
         return bool(cfg.allow_merge_when_no_checks)
     # Otherwise require green/neutral across combined status and suites
     state = combined.get("state")
@@ -153,7 +161,9 @@ def process_item(gh: GitHubClient, owner: str, repo: str, number: int) -> Tuple[
         # If checks are not green (including race where checks haven't registered yet), wait and re-evaluate
         elif reason == "checks_not_green" and pr:
             head_sha = pr.get("head", {}).get("sha")
-            logger.debug("Checks not green for PR #%s; waiting up to %sm for checks to pass", number, cfg.max_wait_minutes)
+            logger.debug(
+                "Checks not green for PR #%s; waiting up to %sm for checks to pass", number, cfg.max_wait_minutes
+            )
             with checks_wait_seconds.time():
                 ok_checks = wait_for_checks(gh, owner, repo, head_sha, cfg)
             if not ok_checks:
@@ -170,7 +180,13 @@ def process_item(gh: GitHubClient, owner: str, repo: str, number: int) -> Tuple[
 
     # Before merging, re-fetch PR to ensure state didn't change
     latest = gh.get_pr(owner, repo, number)
-    if not latest or latest.get("draft") or latest.get("locked") or not any(l["name"] == cfg.label for l in (latest.get("labels") or [])) or latest.get("mergeable") is False:
+    if (
+        not latest
+        or latest.get("draft")
+        or latest.get("locked")
+        or not any(l["name"] == cfg.label for l in (latest.get("labels") or []))
+        or latest.get("mergeable") is False
+    ):
         return False, "state_changed_or_not_mergeable"
 
     # Merge now

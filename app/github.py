@@ -70,7 +70,9 @@ class GitHubClient:
             "User-Agent": "auto-merge-app/1.0",
         }
 
-    def request(self, method: str, path: str, params: Optional[Dict[str, Any]] = None, data: Optional[Any] = None) -> httpx.Response:
+    def request(
+        self, method: str, path: str, params: Optional[Dict[str, Any]] = None, data: Optional[Any] = None
+    ) -> httpx.Response:
         url = path if path.startswith("http") else f"{self.base_url.rstrip('/')}/{path.lstrip('/')}"
         endpoint = f"{method} {path if path.startswith('/') else '/' + path}"
 
@@ -115,7 +117,10 @@ class GitHubClient:
                     break
                 return resp  # type: ignore
             # sleep with exponential backoff
-            sleep_s = min(SETTINGS.backoff_base_seconds * (SETTINGS.backoff_factor ** (attempts - 1)), SETTINGS.max_backoff_seconds)
+            sleep_s = min(
+                SETTINGS.backoff_base_seconds * (SETTINGS.backoff_factor ** (attempts - 1)),
+                SETTINGS.max_backoff_seconds,
+            )
             time.sleep(sleep_s)
         # If we exit loop due to exception after retries, raise it
         if last_exc:
@@ -150,7 +155,17 @@ class GitHubClient:
                     low_budget = False
             # Primary limit: 403 with header remaining=0 or 429
             if status in (403, 429) or low_budget:
-                reason = "secondary" if status == 403 and "secondary" in (resp.json().get("message","" ).lower() if resp.headers.get("content-type"," ").startswith("application/json") else "") else ("primary" if status != 429 else "retry_after")
+                reason = (
+                    "secondary"
+                    if status == 403
+                    and "secondary"
+                    in (
+                        resp.json().get("message", "").lower()
+                        if resp.headers.get("content-type", " ").startswith("application/json")
+                        else ""
+                    )
+                    else ("primary" if status != 429 else "retry_after")
+                )
                 retry_after = resp.headers.get("Retry-After")
                 now = time.time()
                 until = None
@@ -239,7 +254,9 @@ class GitHubClient:
         r = self.request("PUT", f"/repos/{owner}/{repo}/pulls/{number}/update-branch")
         return r.status_code in (200, 202)
 
-    def merge_pr(self, owner: str, repo: str, number: int, method: str, commit_title: str, commit_message: str) -> Tuple[bool, str]:
+    def merge_pr(
+        self, owner: str, repo: str, number: int, method: str, commit_title: str, commit_message: str
+    ) -> Tuple[bool, str]:
         data = {
             "merge_method": method,
             "commit_title": commit_title,

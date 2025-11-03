@@ -20,6 +20,7 @@ class DummyResponse:
         if self._text is None:
             try:
                 import json as _json
+
                 self._text = _json.dumps(self._json)
             except Exception:
                 self._text = ""
@@ -41,6 +42,7 @@ def test_429_triggers_throttle(monkeypatch):
 
     # Replace internal Queue used by GitHubClient
     import app.github as ghmod
+
     monkeypatch.setattr(ghmod, "Queue", lambda: FakeQueue())
 
     # Build a 429 response with Retry-After header
@@ -77,6 +79,7 @@ def test_403_secondary_triggers_throttle(monkeypatch):
             calls["set"] = {"installation_id": installation_id, "until": until, "reason": reason}
 
     import app.github as ghmod
+
     monkeypatch.setattr(ghmod, "Queue", lambda: FakeQueue())
 
     # 403 with secondary rate limit style message

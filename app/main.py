@@ -58,6 +58,7 @@ def verify_signature(secret: str, body: bytes, signature256: Optional[str]) -> b
 
 # Utility to extract PR identities from various events
 
+
 def extract_pr_identities(event: str, payload: Dict[str, Any]) -> Optional[list[Dict[str, Any]]]:
     # pull_request events carry number & repo directly
     if event == "pull_request":
@@ -66,13 +67,15 @@ def extract_pr_identities(event: str, payload: Dict[str, Any]) -> Optional[list[
         inst = (payload.get("installation") or {}).get("id")
         if pr and repo and inst:
             owner = (repo.get("owner") or {}).get("login")
-            return [{
-                "installation_id": inst,
-                "owner": owner,
-                "repo": repo.get("name"),
-                "number": pr.get("number"),
-                "sender": (payload.get("sender") or {}).get("login"),
-            }]
+            return [
+                {
+                    "installation_id": inst,
+                    "owner": owner,
+                    "repo": repo.get("name"),
+                    "number": pr.get("number"),
+                    "sender": (payload.get("sender") or {}).get("login"),
+                }
+            ]
     # check_suite and status events: resolve PRs by commit SHA
     if event in ("check_suite", "status"):
         repo = payload.get("repository") or {}
@@ -96,13 +99,15 @@ def extract_pr_identities(event: str, payload: Dict[str, Any]) -> Optional[list[
             num = pr.get("number") or (pr.get("pull_request") or {}).get("number")
             if not num:
                 continue
-            results.append({
-                "installation_id": int(inst),
-                "owner": owner,
-                "repo": reponame,
-                "number": int(num),
-                "sender": (payload.get("sender") or {}).get("login"),
-            })
+            results.append(
+                {
+                    "installation_id": int(inst),
+                    "owner": owner,
+                    "repo": reponame,
+                    "number": int(num),
+                    "sender": (payload.get("sender") or {}).get("login"),
+                }
+            )
         return results or None
     return None
 
@@ -126,7 +131,9 @@ async def _drain_repo(q: Queue, installation_id: int, owner: str, repo: str):
                 # Schedule a resume after cooldown, up to max_backoff_seconds
                 delay = min(max(0.0, until - now), SETTINGS.max_backoff_seconds)
                 if delay > 0:
-                    logger.debug("Backpressure active; deferring drain for %ss (installation=%s)", delay, installation_id)
+                    logger.debug(
+                        "Backpressure active; deferring drain for %ss (installation=%s)", delay, installation_id
+                    )
                     asyncio.create_task(asyncio.sleep(delay))
                 # Release lock and exit; a subsequent webhook or scheduled re-run will resume
                 return

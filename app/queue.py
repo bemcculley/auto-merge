@@ -58,7 +58,13 @@ class Queue:
     def set_throttle(self, installation_id: int, until_epoch: float, reason: str = "rate_limit") -> None:
         try:
             ttl = max(1, int(until_epoch - time.time()))
-            logger.debug("Setting throttle for installation %s until %s (ttl=%ss) reason=%s", installation_id, until_epoch, ttl, reason)
+            logger.debug(
+                "Setting throttle for installation %s until %s (ttl=%ss) reason=%s",
+                installation_id,
+                until_epoch,
+                ttl,
+                reason,
+            )
             self.r.set(self.throttle_key(installation_id), json.dumps({"until": until_epoch, "reason": reason}), ex=ttl)
             backpressure_active.labels(installation=str(installation_id)).set(1)
         except Exception as e:
@@ -85,7 +91,16 @@ class Queue:
         finally:
             backpressure_active.labels(installation=str(installation_id)).set(0)
 
-    def enqueue(self, installation_id: int, owner: str, repo: str, number: int, sender: Optional[str] = None, retries: int = 0, not_before: float = 0.0) -> bool:
+    def enqueue(
+        self,
+        installation_id: int,
+        owner: str,
+        repo: str,
+        number: int,
+        sender: Optional[str] = None,
+        retries: int = 0,
+        not_before: float = 0.0,
+    ) -> bool:
         q, de, _, _ = self._keys(installation_id, owner, repo)
         item_key = f"{number}"
         # Deduplicate
