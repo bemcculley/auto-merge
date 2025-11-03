@@ -1,0 +1,95 @@
+name: Security Scan (Trivy)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write  # required to upload SARIF results
+
+jobs:
+  trivy:
+    name: Trivy scans (image, fs, config)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Cache Trivy vulnerability database
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: ${{ runner.os }}-trivydb-${{ hashFiles('**/lockfiles', 'uv.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-trivydb-
+
+      - name: Build Docker image
+        run: |
+          IMAGE_TAG=${{ github.run_id }}
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            IMAGE_TAG=pr-${{ github.event.pull_request.number }}
+          fi
+          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
+          docker build -t auto-merge-webhook:${IMAGE_TAG} .
+
+      - name: Trivy image scan (fail on HIGH,CRITICAL)
+        uses: aquasecurity/trivy-action@0.21.0
+        with:
+          scan-type: 'image'
+          image-ref: 'auto-merge-webhook:${{ env.IMAGE_TAG }}'
+          format: 'sarif'
+          output: 'trivy-image.sarif'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'HIGH,CRITICAL'
+          exit-code: '1'
+          timeout: '10m'
+
+      - name: Upload SARIF (image)
+        if: success() || failure()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-image.sarif
+
+      - name: Trivy filesystem scan (project dir)
+        uses: aquasecurity/trivy-action@0.21.0
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-fs.sarif'
+          ignore-unfixed: true
+          severity: 'HIGH,CRITICAL'
+          exit-code: '1'
+          timeout: '10m'
+          # Exclude common noisy paths
+          skip-dirs: '.git,htmlcov,.pytest_cache,.ruff_cache'
+
+      - name: Upload SARIF (filesystem)
+        if: success() || failure()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-fs.sarif
+
+      - name: Trivy config scan (Kubernetes manifests)
+        if: ${{ always() }}
+        uses: aquasecurity/trivy-action@0.21.0
+        with:
+          scan-type: 'config'
+          scan-ref: 'k8s/'
+          format: 'sarif'
+          output: 'trivy-config.sarif'
+          exit-code: '0'  # do not fail PR on config scan by default; adjust as needed
+          timeout: '5m'
+
+      - name: Upload SARIF (config)
+        if: success() || failure()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-config.sarif
