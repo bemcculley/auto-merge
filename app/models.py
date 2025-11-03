@@ -33,8 +33,8 @@ class Config(BaseModel):
     require_up_to_date: bool = True
     # When true, if there are no statuses and no check suites for the PR head
     # the worker treats it as green and may proceed to merge (still subject to
-    # GitHub branch protections).
-    allow_merge_when_no_checks: bool = True
+    # GitHub branch protections). Default is False to require checks by default.
+    allow_merge_when_no_checks: bool = False
     max_wait_minutes: int = 60
     poll_interval_seconds: int = 10
     title_template: str = "{title} (#{number})"

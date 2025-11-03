@@ -1,0 +1,41 @@
+# Auto-merge configuration for the Auto Merge Webhook Service
+# Place this file in the repository you want the app to manage.
+# All keys are flat key/value pairs (no nesting) to match the service's simple YAML parser.
+
+# Label required on a PR to make it eligible for auto-merge
+label: automerge
+
+# Merge strategy to use for the PR when merging
+# Allowed values: squash | rebase | merge
+merge_method: squash
+
+# Require the PR branch to be up-to-date with the base branch before merge
+# If behind and update_branch is true, the worker will attempt to update the branch and wait for checks
+require_up_to_date: true
+
+# If the PR is behind the base branch, attempt an automatic branch update before merging
+update_branch: true
+
+# Require all branch checks to pass before merging. If your repo has no checks at all,
+# the worker will wait up to max_wait_minutes for checks to appear, then proceed only
+# when they report success/neutral. Set to true (not recommended) to allow merging
+# even when there are no checks present.
+allow_merge_when_no_checks: false
+
+# Maximum time (in minutes) to wait for checks to appear/complete when needed
+max_wait_minutes: 60
+
+# Polling interval (in seconds) while waiting for checks to complete
+poll_interval_seconds: 10
+
+# Commit title template used for the merge. Available variables:
+# {number}, {title}, {body}, {head}, {base}, {user}
+# Note: Always include the PR number for traceability.
+# Tip: For squash merges this becomes the resulting single commit title.
+# Keep templates quoted to preserve braces and special chars.
+title_template: "{title} (#{number})"
+
+# Commit message/body template used for the merge. Available variables:
+# {number}, {title}, {body}, {head}, {base}, {user}
+# Tip: For squash merges this becomes the resulting single commit body.
+body_template: "{body}\n\nAuto-merged by Auto Merge Bot for PR #{number}"
