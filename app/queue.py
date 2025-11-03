@@ -1,5 +1,6 @@
 import json
 import time
+import logging
 from typing import Optional, Tuple, List
 import redis
 
@@ -20,6 +21,8 @@ from .metrics import (
     backpressure_active,
 )
 
+logger = logging.getLogger(__name__)
+
 
 class Queue:
     def __init__(self):
@@ -39,9 +42,11 @@ class Queue:
     def set_throttle(self, installation_id: int, until_epoch: float, reason: str = "rate_limit") -> None:
         try:
             ttl = max(1, int(until_epoch - time.time()))
+            logger.debug("Setting throttle for installation %s until %s (ttl=%ss) reason=%s", installation_id, until_epoch, ttl, reason)
             self.r.set(self.throttle_key(installation_id), json.dumps({"until": until_epoch, "reason": reason}), ex=ttl)
             backpressure_active.labels(installation=str(installation_id)).set(1)
-        except Exception:
+        except Exception as e:
+            logger.debug("Failed to set throttle: %s", e)
             pass
 
     def get_throttle(self, installation_id: int) -> Optional[dict]:

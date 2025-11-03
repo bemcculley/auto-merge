@@ -196,7 +196,7 @@ merge_attempts_total = Counter(
 merges_success_total = Counter(
     "merges_success_total",
     "Successful merges by method",
-    labelnames=("method"),
+    labelnames=("method",),
     registry=REGISTRY,
 )
 merges_failed_total = Counter(
