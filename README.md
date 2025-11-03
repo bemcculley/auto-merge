@@ -91,6 +91,7 @@ In each target repository that will be auto-merged by this app, create `.github/
 
 ```
 label: automerge
+require_label: true   # when false, the PR label is not required for auto-merge
 merge_method: squash  # one of: squash | rebase | merge
 require_up_to_date: true
 update_branch: true
@@ -104,6 +105,10 @@ poll_interval_seconds: 10
 title_template: "{title} (#{number})"
 body_template: "{body}\n\nAuto-merged by Auto Merge Bot for PR #{number}"
 ```
+
+Notes:
+- By default, `require_label: true` preserves the existing behavior: the PR must have the `label` (default `automerge`).
+- Set `require_label: false` to allow merges without a PR label. All other gates still apply (draft/locked, checks/branch protection, up-to-date policy, etc.).
 
 Behavior notes:
 - The worker evaluates combined commit status and check suites. All must be green/neutral.
@@ -170,28 +175,110 @@ With Prometheus Operator, create a ServiceMonitor pointing to the app Service.
 
 ## Running Locally
 
-- Install dependencies (for the webhook service):
+- Prefer using uv and the project virtual environment:
 
 ```
-pip install -e .
-uvicorn app.main:app --host 0.0.0.0 --port 8080
+python -m venv .venv
+source .venv/bin/activate
+uv sync --extra dev
 ```
 
-- Or use Docker Compose (preferred):
+- Start the server (normal mode):
 
 ```
-docker compose up -d --build
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8080
 ```
 
-- Send a test request (signature is required in real use):
+### Debug mode (local)
+
+- Increase verbosity and enable access logs. The `--proxy-headers` and `--forwarded-allow-ips "*"` flags help when running behind a local proxy/tunnel:
 
 ```
-curl -X POST http://localhost:8080/webhook -d '{}' -H 'X-GitHub-Event: ping' -H 'X-Hub-Signature-256: sha256=dummy'
+uv run uvicorn app.main:app \
+  --host 0.0.0.0 --port 8080 \
+  --log-level debug --access-log \
+  --proxy-headers --forwarded-allow-ips "*"
+```
+
+- You can also raise internal log verbosity via env:
+
+```
+LOG_LEVEL=DEBUG uv run uvicorn app.main:app --host 0.0.0.0 --port 8080
+```
+
+- Docker Compose (preferred for parity with prod):
+
+```
+# Ensure APP_ID, APP_PRIVATE_KEY path, WEBHOOK_SECRET are set in your shell or .env
+LOG_LEVEL=DEBUG docker compose up -d --build
+# View logs
+docker compose logs -f app
+```
+
+- One-off debug run under Compose (exposes ports and uses the image’s dependencies):
+
+```
+docker compose run --rm --service-ports app \
+  uvicorn app.main:app --host 0.0.0.0 --port 8080 \
+  --log-level debug --access-log --proxy-headers --forwarded-allow-ips "*"
+```
+
+Notes:
+- Graceful shutdown: Press Ctrl+C to stop. In Docker Compose, `init: true` and `SIGINT` are configured so `docker compose down` will stop the app cleanly.
+- Health checks: `curl -s localhost:8080/healthz` and `curl -s localhost:8080/readyz`.
+- Metrics: `curl -s localhost:8080/metrics | head`.
+- Webhook testing: real requests must include a valid `X-Hub-Signature-256` HMAC. For local testing, you can compute one with OpenSSL (do not print secrets):
+
+```
+export WEBHOOK_SECRET=your-secret
+BODY='{"zen":"keep it logically awesome"}'
+SIG="sha256=$(printf "%s" "$BODY" | openssl dgst -sha256 -hmac "$WEBHOOK_SECRET" -r | awk '{print $1}')"
+curl -X POST http://localhost:8080/webhook \
+  -H "X-GitHub-Event: ping" \
+  -H "X-Hub-Signature-256: $SIG" \
+  -d "$BODY"
 ```
 
 ---
 
 ## Testing
+
+### Pre-commit (local checks aligned with GitHub Actions)
+Pre-commit hooks enforce the same checks locally that run in CI (Ruff format/lint, yamllint). A pre-push hook runs the unit tests using uv.
+
+Setup once (using uv):
+
+```
+uv sync --extra dev
+pre-commit install                       # install default (commit) hooks
+pre-commit install --hook-type pre-push  # install pre-push tests hook
+```
+
+Run on all files manually (two equivalent options):
+
+```
+# Prefer letting pre-commit create hook envs with uv
+PRE_COMMIT_USE_UV=1 pre-commit run --all-files
+
+# or run pre-commit itself via uv (uses the project venv)
+uv run pre-commit run --all-files
+```
+
+Troubleshooting (Homebrew pre-commit):
+- If you see an error like `No module named virtualenv` from pre-commit trying to build hook envs, enable uv-backed env creation:
+
+  `PRE_COMMIT_USE_UV=1 pre-commit run --all-files`
+
+  or upgrade pre-commit to >= 3.6.0 and ensure `uv` is installed: `pip install uv`.
+
+Notes:
+- The commit hooks run:
+  - `ruff format` (apply formatting)
+  - `ruff check` (lint)
+  - `yamllint` (per .yamllint.yaml)
+  - basic hygiene checks (trailing whitespace, EOF fixer, merge conflicts, JSON/YAML syntax)
+- The pre-push hook runs: `uv run -m pytest -q`. Ensure dev deps are installed (via `uv sync --extra dev`).
+- CI mirrors these: see `.github/workflows/ruff.yml`, `.github/workflows/yamllint.yml`, `.github/workflows/ci.yml`, and `.github/workflows/pre-commit.yml`.
 
 Run unit tests:
 
@@ -251,6 +338,41 @@ Notes:
 - PR never merges: Verify the PR has the configured label (default `automerge`) and is not draft/locked.
 - Redis errors: Confirm `REDIS_URL` and network connectivity; check Redis logs.
 - Stuck worker: The per‑repo lock auto‑expires; ensure the pod/container clock is correct.
+
+### Redis background save failures or OOM due to overcommit (vm.overcommit_memory)
+If you see Redis warnings like "Background save failed" or fork OOM messages, enable memory overcommit on Linux hosts.
+This is a host kernel setting and cannot be changed from inside the container.
+
+- Check current value:
+  ```
+  sysctl vm.overcommit_memory
+  ```
+  A value of `1` is recommended by Redis for systems using background saves (AOF/RDB).
+
+- Temporarily set until next reboot (Linux host):
+  ```
+  sudo sysctl -w vm.overcommit_memory=1
+  ```
+
+- Persist across reboots (Linux host):
+  ```
+  echo 'vm.overcommit_memory = 1' | sudo tee -a /etc/sysctl.conf
+  sudo sysctl -p
+  ```
+
+Environment notes:
+- Docker Compose on Linux: run the above commands on the Docker host. Then restart the Redis container:
+  ```
+  docker compose restart redis
+  ```
+- Docker Desktop on macOS/Windows: this setting does not apply to the host OS; Redis runs inside a Linux VM managed by Docker Desktop and generally does not require host tweaks.
+- Kubernetes: set this at the node level via your node bootstrap or ops tooling. Alternatively, cluster admins can allow pod-level sysctls and set `securityContext.sysctls`, but this is an advanced/ops-approved option only.
+
+Verification:
+- Check Redis logs after restart (`docker compose logs -f redis` or `kubectl logs`). The overcommit warning should be gone and `BGSAVE` should succeed.
+- Optional: `redis-cli INFO memory` and ensure no recent `OOM`/fork warnings.
+
+For more details, see the Redis documentation on memory overcommit.
 
 ---
 

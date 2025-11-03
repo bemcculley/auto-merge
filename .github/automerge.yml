@@ -5,6 +5,9 @@
 # Label required on a PR to make it eligible for auto-merge
 label: automerge
 
+# Automatically merge all PRs once required checks pass
+require_label: false
+
 # Merge strategy to use for the PR when merging
 # Allowed values: squash | rebase | merge
 merge_method: squash
@@ -23,7 +26,7 @@ update_branch: true
 allow_merge_when_no_checks: false
 
 # Maximum time (in minutes) to wait for checks to appear/complete when needed
-max_wait_minutes: 60
+max_wait_minutes: 20
 
 # Polling interval (in seconds) while waiting for checks to complete
 poll_interval_seconds: 10

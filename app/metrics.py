@@ -1,6 +1,4 @@
 import os
-import time
-from typing import Optional
 from prometheus_client import CollectorRegistry, CONTENT_TYPE_LATEST, generate_latest, Counter, Gauge, Histogram
 
 try:
@@ -203,6 +201,37 @@ merges_failed_total = Counter(
     "merges_failed_total",
     "Failed merges by reason",
     labelnames=("reason",),
+    registry=REGISTRY,
+)
+# Additional visibility metrics
+merge_blocked_total = Counter(
+    "merge_blocked_total",
+    "Merges blocked by policy before attempting merge",
+    labelnames=("reason",),
+    registry=REGISTRY,
+)
+queue_starvation_total = Counter(
+    "queue_starvation_total",
+    "Items that exceeded max per-item processing window and were requeued to tail",
+    labelnames=("owner", "repo"),
+    registry=REGISTRY,
+)
+queue_dead_letter_total = Counter(
+    "queue_dead_letter_total",
+    "Items sent to dead-letter after exhausting retries",
+    labelnames=("owner", "repo"),
+    registry=REGISTRY,
+)
+queue_requeued_total = Counter(
+    "queue_requeued_total",
+    "Items requeued with backoff after transient failures",
+    labelnames=("owner", "repo"),
+    registry=REGISTRY,
+)
+queue_deferred_total = Counter(
+    "queue_deferred_total",
+    "Items deferred due to not_before scheduled time in the future",
+    labelnames=("owner", "repo"),
     registry=REGISTRY,
 )
 

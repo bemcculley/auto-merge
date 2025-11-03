@@ -1,5 +1,4 @@
 from app.worker import process_item
-from app.models import Config
 
 
 class GHBase:
@@ -36,12 +35,19 @@ class GHSuccess(GHBase):
         self.calls.append(("get_pr", number))
         return self.pr
 
+    # Ensure checks are considered green under the default config (which requires checks),
+    # so the worker does not enter the wait loop in tests.
+    def list_check_suites(self, owner, repo, sha):
+        return [{"conclusion": "success"}]
+
     def merge_pr(self, owner, repo, number, method, title, body):
         self.calls.append(("merge", method))
         return True, "merged"
 
 
-def test_worker_process_item_success():
+def test_worker_process_item_success(monkeypatch):
+    # Avoid any accidental sleeps if the worker path changes in future
+    monkeypatch.setattr("time.sleep", lambda s: None)
     gh = GHSuccess()
     ok, msg = process_item(gh, "octo", "repo", 10)
     assert ok is True
@@ -69,6 +75,14 @@ class GHBehindThenUpdate(GHBase):
         self.pr["mergeable_state"] = self.state
         self.state = "clean"
         return self.pr
+
+    def get_combined_status(self, owner, repo, sha):
+        # Report green combined status with at least one status to avoid the no-checks branch
+        return {"state": "success", "statuses": [{"context": "ci", "state": "success"}]}
+
+    def list_check_suites(self, owner, repo, sha):
+        # Report successful check suite to satisfy are_checks_green immediately
+        return [{"conclusion": "success"}]
 
     def update_branch(self, owner, repo, number):
         self.calls.append(("update_branch", number))

@@ -1,0 +1,44 @@
+minimum_pre_commit_version: "3.6.0"
+# Use uv for environment creation when available. Locally, ensure PRE_COMMIT_USE_UV=1 is set.
+# Alternatively, define hooks with language: system and rely on `uv sync --extra dev` beforehand.
+
+repos:
+  # Ruff: formatter and linter (aligns with .github/workflows/ruff.yml)
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.4
+    hooks:
+      - id: ruff-format
+        name: ruff-format (apply formatting)
+      - id: ruff
+        name: ruff (lint)
+        args: ["--output-format=github"]
+
+  # yamllint: aligns with .github/workflows/yamllint.yml and .yamllint.yaml
+  - repo: https://github.com/adrienverge/yamllint
+    rev: v1.35.1
+    hooks:
+      - id: yamllint
+        additional_dependencies: []
+        args: ["-c", ".yamllint.yaml"]
+
+  # Basic hygiene hooks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-merge-conflict
+      - id: check-json
+      - id: check-yaml
+        args: ["-m"]
+
+  # Local hook: run unit tests on pre-push (aligns with CI workflow using pytest)
+  # Uses uv to ensure the same toolchain; assumes dev deps installed.
+  - repo: local
+    hooks:
+      - id: pytest-pre-push
+        name: pytest (pre-push)
+        entry: uv run -m pytest -q
+        language: system
+        pass_filenames: false
+        stages: [pre-push]

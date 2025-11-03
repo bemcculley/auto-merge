@@ -28,8 +28,9 @@ def test_webhook_invalid_signature_401(monkeypatch):
 
     r = client.post(
         "/webhook",
-        data=body,
+        content=body,
         headers={
+            "Content-Type": "application/json",
             "X-GitHub-Event": "pull_request",
             "X-Hub-Signature-256": "sha256=deadbeef",
             "X-GitHub-Delivery": "1",
@@ -71,8 +72,9 @@ def test_webhook_pull_request_enqueues(monkeypatch):
 
     r = client.post(
         "/webhook",
-        data=body,
+        content=body,
         headers={
+            "Content-Type": "application/json",
             "X-GitHub-Event": "pull_request",
             "X-Hub-Signature-256": sig,
             "X-GitHub-Delivery": "2",
@@ -124,8 +126,9 @@ def test_webhook_check_suite_resolves_prs(monkeypatch):
 
     r = client.post(
         "/webhook",
-        data=body,
+        content=body,
         headers={
+            "Content-Type": "application/json",
             "X-GitHub-Event": "check_suite",
             "X-Hub-Signature-256": sig,
             "X-GitHub-Delivery": "3",

@@ -10,6 +10,9 @@ services:
   app:
     build: .
     image: auto-merge-webhook:dev
+    init: true
+    stop_signal: SIGINT
+    stop_grace_period: 15s
     environment:
       - APP_ID=${APP_ID}
       - APP_PRIVATE_KEY=/run/secrets/app_private_key.pem

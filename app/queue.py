@@ -16,9 +16,11 @@ from .metrics import (
     redis_latency_seconds,
     worker_lock_acquired_total,
     worker_lock_failed_total,
-    worker_lock_lost_total,
     worker_active,
     backpressure_active,
+    queue_dead_letter_total,
+    queue_requeued_total,
+    queue_deferred_total,
 )
 
 logger = logging.getLogger(__name__)
@@ -28,12 +30,51 @@ class Queue:
     def __init__(self):
         self.r = redis.Redis.from_url(SETTINGS.redis_url, decode_responses=True)
 
+    def get_depth(self, installation_id: int, owner: str, repo: str) -> int:
+        """Return current queue length for the repo (best-effort)."""
+        q, _, _, _ = self._keys(installation_id, owner, repo)
+        try:
+            return int(self.r.llen(q))
+        except Exception:
+            return 0
+
+    def find_position(self, installation_id: int, owner: str, repo: str, number: int) -> int:
+        """Return 1-based position of PR number in the queue, or 0 if not found.
+        Uses LRANGE to avoid fetching the entire list in very large queues; capped for safety.
+        """
+        q, _, _, _ = self._keys(installation_id, owner, repo)
+        try:
+            # Fetch up to first 1000 items to bound cost; for larger queues, position beyond window returns 0.
+            items = self.r.lrange(q, 0, 999)
+            for idx, raw in enumerate(items):
+                try:
+                    if int(json.loads(raw).get("number")) == int(number):
+                        return idx + 1
+                except Exception:
+                    continue
+            return 0
+        except Exception:
+            return 0
+
+    def requeue_tail(self, installation_id: int, owner: str, repo: str, item: dict) -> None:
+        """Requeue item to tail immediately (used for starvation control)."""
+        q, de, _, _ = self._keys(installation_id, owner, repo)
+        try:
+            self.r.rpush(q, json.dumps(item))
+            self.r.sadd(de, str(item.get("number")))
+        except Exception:
+            # Best effort; if this fails we don't crash the worker
+            pass
+
     def _keys(self, installation_id: int, owner: str, repo: str) -> Tuple[str, str, str, str]:
         q = SETTINGS.redis_key("queue", str(installation_id), f"{owner}/{repo}")
         de = SETTINGS.redis_key("dedupe", str(installation_id), f"{owner}/{repo}")
         lock = SETTINGS.redis_key("lock", str(installation_id), f"{owner}/{repo}")
         meta = SETTINGS.redis_key("meta", str(installation_id), f"{owner}/{repo}")
         return q, de, lock, meta
+
+    def _dlq_key(self, installation_id: int, owner: str, repo: str) -> str:
+        return SETTINGS.redis_key("dlq", str(installation_id), f"{owner}/{repo}")
 
     # --- Rate limit backpressure (per installation) ---
     def throttle_key(self, installation_id: int) -> str:
@@ -42,7 +83,13 @@ class Queue:
     def set_throttle(self, installation_id: int, until_epoch: float, reason: str = "rate_limit") -> None:
         try:
             ttl = max(1, int(until_epoch - time.time()))
-            logger.debug("Setting throttle for installation %s until %s (ttl=%ss) reason=%s", installation_id, until_epoch, ttl, reason)
+            logger.debug(
+                "Setting throttle for installation %s until %s (ttl=%ss) reason=%s",
+                installation_id,
+                until_epoch,
+                ttl,
+                reason,
+            )
             self.r.set(self.throttle_key(installation_id), json.dumps({"until": until_epoch, "reason": reason}), ex=ttl)
             backpressure_active.labels(installation=str(installation_id)).set(1)
         except Exception as e:
@@ -69,7 +116,16 @@ class Queue:
         finally:
             backpressure_active.labels(installation=str(installation_id)).set(0)
 
-    def enqueue(self, installation_id: int, owner: str, repo: str, number: int, sender: Optional[str] = None) -> bool:
+    def enqueue(
+        self,
+        installation_id: int,
+        owner: str,
+        repo: str,
+        number: int,
+        sender: Optional[str] = None,
+        retries: int = 0,
+        not_before: float = 0.0,
+    ) -> bool:
         q, de, _, _ = self._keys(installation_id, owner, repo)
         item_key = f"{number}"
         # Deduplicate
@@ -80,6 +136,8 @@ class Queue:
             "number": number,
             "sender": sender,
             "ts": time.time(),
+            "retries": retries,
+            "not_before": not_before,
         }
         data = json.dumps(payload)
         t0 = time.perf_counter()
@@ -115,7 +173,23 @@ class Queue:
             return None
         queue_pop_total.labels(owner=owner, repo=repo).inc()
         item = json.loads(data)
-        # Remove from dedupe set
+        # Defer if not_before is in the future
+        try:
+            nb = float(item.get("not_before", 0) or 0)
+        except Exception:
+            nb = 0.0
+        now = time.time()
+        if nb and nb > now:
+            # Push back to tail and mark deferred
+            try:
+                self.r.rpush(q, json.dumps(item))
+                queue_deferred_total.labels(owner=owner, repo=repo).inc()
+            except Exception:
+                pass
+            # Do not modify dedupe; it remains in-queue
+            self.update_gauges(installation_id, owner, repo)
+            return None
+        # Remove from dedupe set since we are going to process it now
         try:
             self.r.srem(SETTINGS.redis_key("dedupe", str(installation_id), f"{owner}/{repo}"), str(item["number"]))
         except Exception:
@@ -147,6 +221,34 @@ class Queue:
                 queue_oldest_age_seconds.labels(owner=owner, repo=repo).set(0)
         except Exception:
             # Do not raise on metrics update
+            pass
+
+    # --- Retry / DLQ helpers ---
+    def requeue_with_backoff(self, installation_id: int, owner: str, repo: str, item: dict) -> None:
+        q, de, _, _ = self._keys(installation_id, owner, repo)
+        retries = int(item.get("retries", 0) or 0) + 1
+        delay = SETTINGS.backoff_base_seconds * (SETTINGS.backoff_factor ** (retries - 1))
+        delay = min(delay, SETTINGS.max_backoff_seconds)
+        item["retries"] = retries
+        item["not_before"] = time.time() + delay
+        try:
+            pipe = self.r.pipeline()
+            pipe.rpush(q, json.dumps(item))
+            # ensure back in dedupe set
+            pipe.sadd(de, str(item.get("number")))
+            pipe.execute()
+            queue_requeued_total.labels(owner=owner, repo=repo).inc()
+        except Exception:
+            # If requeue fails, last resort: send to DLQ
+            self.send_to_dead_letter(installation_id, owner, repo, item)
+
+    def send_to_dead_letter(self, installation_id: int, owner: str, repo: str, item: dict) -> None:
+        dlq = self._dlq_key(installation_id, owner, repo)
+        try:
+            self.r.rpush(dlq, json.dumps(item))
+            queue_dead_letter_total.labels(owner=owner, repo=repo).inc()
+        except Exception:
+            # Swallow to avoid crashing the worker
             pass
 
     def _maybe_clear_oldest_meta(self, qkey: str) -> None:

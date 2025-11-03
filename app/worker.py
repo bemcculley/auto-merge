@@ -1,6 +1,6 @@
 import time
 import logging
-from typing import Tuple
+from typing import Tuple, Callable, Optional
 
 from .github import GitHubClient
 from .models import Config
@@ -11,6 +11,7 @@ from .metrics import (
     merge_attempts_total,
     merges_success_total,
     merges_failed_total,
+    merge_blocked_total,
 )
 
 logger = logging.getLogger(__name__)
@@ -42,7 +43,9 @@ def parse_simple_yaml(text: str) -> dict:
 
 def load_config(gh: GitHubClient, owner: str, repo: str) -> Config:
     # Read .github/automerge.yml or .yaml
-    content = gh.load_repo_file(owner, repo, ".github/automerge.yml") or gh.load_repo_file(owner, repo, ".github/automerge.yaml")
+    content = gh.load_repo_file(owner, repo, ".github/automerge.yml") or gh.load_repo_file(
+        owner, repo, ".github/automerge.yaml"
+    )
     user = {}
     if content:
         try:
@@ -60,7 +63,13 @@ def are_checks_green(gh: GitHubClient, owner: str, repo: str, sha: str, cfg: Con
     statuses = combined.get("statuses") or []
     # If there are no statuses and no check suites, allow merge when configured
     if not statuses and not suites:
-        logger.debug("No statuses and no check suites for %s/%s@%s; allow_merge_when_no_checks=%s", owner, repo, sha, cfg.allow_merge_when_no_checks)
+        logger.debug(
+            "No statuses and no check suites for %s/%s@%s; allow_merge_when_no_checks=%s",
+            owner,
+            repo,
+            sha,
+            cfg.allow_merge_when_no_checks,
+        )
         return bool(cfg.allow_merge_when_no_checks)
     # Otherwise require green/neutral across combined status and suites
     state = combined.get("state")
@@ -84,14 +93,19 @@ def evaluate_mergeability(gh: GitHubClient, owner: str, repo: str, number: int, 
         return False, "draft", pr
     if pr.get("locked"):
         return False, "locked", pr
-    if not any(l["name"] == label for l in pr.get("labels", [])):
-        return False, "missing_label", pr
+    # Enforce label only when required by policy (default: True)
+    if cfg.require_label:
+        if not any(lbl.get("name") == label for lbl in pr.get("labels", [])):
+            return False, "missing_label", pr
 
     mergeable_state = pr.get("mergeable_state")  # clean, unstable, blocked, behind, dirty, unknown
     head_sha = pr.get("head", {}).get("sha")
 
     # Up-to-date requirement
     if cfg.require_up_to_date and mergeable_state in ("behind", "blocked"):
+        # visibility metric: blocked may indicate reviews or protections
+        if mergeable_state == "blocked":
+            merge_blocked_total.labels(reason="reviews_or_protection").inc()
         return False, f"behind_or_blocked:{mergeable_state}", pr
 
     # Checks must be green
@@ -105,16 +119,36 @@ def evaluate_mergeability(gh: GitHubClient, owner: str, repo: str, number: int, 
     return True, "mergeable", pr
 
 
-def wait_for_checks(gh: GitHubClient, owner: str, repo: str, sha: str, cfg: Config) -> bool:
+def wait_for_checks(
+    gh: GitHubClient,
+    owner: str,
+    repo: str,
+    sha: str,
+    cfg: Config,
+    heartbeat: Optional[Callable[[], None]] = None,
+) -> bool:
     deadline = time.time() + cfg.max_wait_minutes * 60
     while time.time() < deadline:
         if are_checks_green(gh, owner, repo, sha, cfg):
             return True
+        # Allow caller to refresh locks/heartbeat during long waits
+        try:
+            if heartbeat is not None:
+                heartbeat()
+        except Exception:
+            # Heartbeat failures should not break the wait loop
+            pass
         time.sleep(max(5, cfg.poll_interval_seconds))
     return False
 
 
-def process_item(gh: GitHubClient, owner: str, repo: str, number: int) -> Tuple[bool, str]:
+def process_item(
+    gh: GitHubClient,
+    owner: str,
+    repo: str,
+    number: int,
+    heartbeat: Optional[Callable[[], None]] = None,
+) -> Tuple[bool, str]:
     logger.debug("Loading config for %s/%s", owner, repo)
     cfg = load_config(gh, owner, repo)
     logger.debug("Evaluating PR #%s for %s/%s with cfg=%s", number, owner, repo, cfg.model_dump())
@@ -135,7 +169,7 @@ def process_item(gh: GitHubClient, owner: str, repo: str, number: int) -> Tuple[
             # Wait for checks
             head_sha = pr.get("head", {}).get("sha")
             with checks_wait_seconds.time():
-                ok_checks = wait_for_checks(gh, owner, repo, head_sha, cfg)
+                ok_checks = wait_for_checks(gh, owner, repo, head_sha, cfg, heartbeat=heartbeat)
             if not ok_checks:
                 logger.debug("Checks timeout after update for PR #%s", number)
                 return False, "checks_timeout"
@@ -149,7 +183,9 @@ def process_item(gh: GitHubClient, owner: str, repo: str, number: int) -> Tuple[
         # If checks are not green (including race where checks haven't registered yet), wait and re-evaluate
         elif reason == "checks_not_green" and pr:
             head_sha = pr.get("head", {}).get("sha")
-            logger.debug("Checks not green for PR #%s; waiting up to %sm for checks to pass", number, cfg.max_wait_minutes)
+            logger.debug(
+                "Checks not green for PR #%s; waiting up to %sm for checks to pass", number, cfg.max_wait_minutes
+            )
             with checks_wait_seconds.time():
                 ok_checks = wait_for_checks(gh, owner, repo, head_sha, cfg)
             if not ok_checks:
@@ -164,23 +200,48 @@ def process_item(gh: GitHubClient, owner: str, repo: str, number: int) -> Tuple[
         else:
             return False, reason
 
+    # Before merging, re-fetch PR to ensure state didn't change
+    latest = gh.get_pr(owner, repo, number)
+    if (
+        not latest
+        or latest.get("draft")
+        or latest.get("locked")
+        or (cfg.require_label and not any((lbl or {}).get("name") == cfg.label for lbl in (latest.get("labels") or [])))
+        or latest.get("mergeable") is False
+    ):
+        return False, "state_changed_or_not_mergeable"
+
     # Merge now
+    def _esc(s: str | None) -> str:
+        x = s or ""
+        return x.replace("{", "{{").replace("}", "}}")
+
     method = cfg.merge_method
-    title = cfg.title_template.format(
-        number=number,
-        title=pr.get("title", f"PR #{number}"),
-        head=pr.get("head", {}).get("ref"),
-        base=pr.get("base", {}).get("ref"),
-        user=(pr.get("user") or {}).get("login"),
-    )
-    body = cfg.body_template.format(
-        number=number,
-        body=pr.get("body") or "",
-        title=pr.get("title", f"PR #{number}"),
-        head=pr.get("head", {}).get("ref"),
-        base=pr.get("base", {}).get("ref"),
-        user=(pr.get("user") or {}).get("login"),
-    )
+    try:
+        raw_title = cfg.title_template.format(
+            number=number,
+            title=_esc(latest.get("title", f"PR #{number}")),
+            head=_esc((latest.get("head", {}) or {}).get("ref")),
+            base=_esc((latest.get("base", {}) or {}).get("ref")),
+            user=_esc(((latest.get("user") or {}) or {}).get("login")),
+        )
+    except KeyError:
+        raw_title = f"PR #{number}"
+    # Truncate title to 255 chars
+    title = (raw_title or "")[:255]
+
+    try:
+        body = cfg.body_template.format(
+            number=number,
+            body=_esc(latest.get("body") or ""),
+            title=_esc(latest.get("title", f"PR #{number}")),
+            head=_esc((latest.get("head", {}) or {}).get("ref")),
+            base=_esc((latest.get("base", {}) or {}).get("ref")),
+            user=_esc(((latest.get("user") or {}) or {}).get("login")),
+        )
+    except KeyError:
+        body = f"Auto-merged by Auto Merge Bot for PR #{number}"
+
     logger.debug("Merging PR #%s for %s/%s with method=%s", number, owner, repo, method)
     with worker_processing_seconds.labels(phase="merge", owner=owner, repo=repo).time():
         ok, msg = gh.merge_pr(owner, repo, number, method, title, body)

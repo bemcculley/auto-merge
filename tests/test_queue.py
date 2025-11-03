@@ -1,5 +1,3 @@
-import os
-import time
 import json
 import fakeredis
 import pytest

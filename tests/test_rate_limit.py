@@ -20,6 +20,7 @@ class DummyResponse:
         if self._text is None:
             try:
                 import json as _json
+
                 self._text = _json.dumps(self._json)
             except Exception:
                 self._text = ""
@@ -33,6 +34,15 @@ def _bypass_headers(monkeypatch):
 
 
 def test_429_triggers_throttle(monkeypatch):
+    # Patch time.sleep to avoid real waiting but verify it was invoked (backoff path exercised)
+    sleep_calls = {"count": 0, "args": []}
+
+    def _fake_sleep(s):
+        sleep_calls["count"] += 1
+        sleep_calls["args"].append(s)
+        return None
+
+    monkeypatch.setattr(time, "sleep", _fake_sleep)
     calls = {}
 
     class FakeQueue:
@@ -41,6 +51,7 @@ def test_429_triggers_throttle(monkeypatch):
 
     # Replace internal Queue used by GitHubClient
     import app.github as ghmod
+
     monkeypatch.setattr(ghmod, "Queue", lambda: FakeQueue())
 
     # Build a 429 response with Retry-After header
@@ -67,9 +78,20 @@ def test_429_triggers_throttle(monkeypatch):
     assert calls["set"]["installation_id"] == 42
     # reason comes from 429 branch: "retry_after"
     assert calls["set"]["reason"] in ("retry_after", "rate_limit")
+    # Ensure backoff path exercised (sleep invoked at least once)
+    assert sleep_calls["count"] >= 1
 
 
 def test_403_secondary_triggers_throttle(monkeypatch):
+    # Patch time.sleep to avoid real waiting but verify it was invoked (backoff path exercised)
+    sleep_calls = {"count": 0, "args": []}
+
+    def _fake_sleep(s):
+        sleep_calls["count"] += 1
+        sleep_calls["args"].append(s)
+        return None
+
+    monkeypatch.setattr(time, "sleep", _fake_sleep)
     calls = {}
 
     class FakeQueue:
@@ -77,6 +99,7 @@ def test_403_secondary_triggers_throttle(monkeypatch):
             calls["set"] = {"installation_id": installation_id, "until": until, "reason": reason}
 
     import app.github as ghmod
+
     monkeypatch.setattr(ghmod, "Queue", lambda: FakeQueue())
 
     # 403 with secondary rate limit style message
