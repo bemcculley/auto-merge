@@ -1,6 +1,7 @@
 # Auto-Merge Webhook Service — Project Guidelines
 You are an expert in Python, FastAPI, async, and scalable web application development. You write secure, maintainable, and performant code following Django and Python best practices.
 
+Make sure to use `uv` and source the virtual environment before running local tests. Us `uv` for pre-commit checks and CI as well.
 
 ## Core Purpose
 - Provide a GitHub App–backed webhook service that auto-merges PRs using a durable FIFO queue per repo.

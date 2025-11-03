@@ -155,6 +155,7 @@ async def _drain_repo(q: Queue, installation_id: int, owner: str, repo: str):
                     except Exception:
                         # Best-effort; ignore heartbeat errors
                         pass
+
                 ok, msg = process_item(gh, owner, repo, number, heartbeat=_heartbeat)
             except Exception as e:
                 # Treat as transient; requeue with backoff up to max_retries, then DLQ

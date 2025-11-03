@@ -41,4 +41,4 @@ repos:
         entry: uv run -m pytest -q
         language: system
         pass_filenames: false
-        stages: [push]
+        stages: [pre-push]
