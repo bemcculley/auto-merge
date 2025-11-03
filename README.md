@@ -91,6 +91,7 @@ In each target repository that will be auto-merged by this app, create `.github/
 
 ```
 label: automerge
+require_label: true   # when false, the PR label is not required for auto-merge
 merge_method: squash  # one of: squash | rebase | merge
 require_up_to_date: true
 update_branch: true
@@ -104,6 +105,10 @@ poll_interval_seconds: 10
 title_template: "{title} (#{number})"
 body_template: "{body}\n\nAuto-merged by Auto Merge Bot for PR #{number}"
 ```
+
+Notes:
+- By default, `require_label: true` preserves the existing behavior: the PR must have the `label` (default `automerge`).
+- Set `require_label: false` to allow merges without a PR label. All other gates still apply (draft/locked, checks/branch protection, up-to-date policy, etc.).
 
 Behavior notes:
 - The worker evaluates combined commit status and check suites. All must be green/neutral.

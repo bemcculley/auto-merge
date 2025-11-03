@@ -93,8 +93,10 @@ def evaluate_mergeability(gh: GitHubClient, owner: str, repo: str, number: int, 
         return False, "draft", pr
     if pr.get("locked"):
         return False, "locked", pr
-    if not any(lbl["name"] == label for lbl in pr.get("labels", [])):
-        return False, "missing_label", pr
+    # Enforce label only when required by policy (default: True)
+    if cfg.require_label:
+        if not any(lbl.get("name") == label for lbl in pr.get("labels", [])):
+            return False, "missing_label", pr
 
     mergeable_state = pr.get("mergeable_state")  # clean, unstable, blocked, behind, dirty, unknown
     head_sha = pr.get("head", {}).get("sha")
@@ -204,7 +206,7 @@ def process_item(
         not latest
         or latest.get("draft")
         or latest.get("locked")
-        or not any(lbl["name"] == cfg.label for lbl in (latest.get("labels") or []))
+        or (cfg.require_label and not any((lbl or {}).get("name") == cfg.label for lbl in (latest.get("labels") or [])))
         or latest.get("mergeable") is False
     ):
         return False, "state_changed_or_not_mergeable"

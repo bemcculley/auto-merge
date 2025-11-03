@@ -23,7 +23,30 @@ from .worker import process_item
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Auto Merge Webhook Service", version=os.getenv("SERVICE_VERSION", "dev"))
+from contextlib import asynccontextmanager
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Track background tasks so we can cancel on shutdown
+    app.state.background_tasks = set()
+    try:
+        yield
+    finally:
+        # Cancel any in-flight background tasks
+        tasks = list(getattr(app.state, "background_tasks", set()))
+        if tasks:
+            logger.debug("Shutting down: cancelling %s background task(s)", len(tasks))
+            for t in tasks:
+                t.cancel()
+            # Wait briefly for tasks to finish
+            try:
+                await asyncio.wait(tasks, timeout=5)
+            except Exception:
+                pass
+
+
+app = FastAPI(title="Auto Merge Webhook Service", version=os.getenv("SERVICE_VERSION", "dev"), lifespan=lifespan)
 
 
 @app.get("/healthz")
@@ -134,7 +157,6 @@ async def _drain_repo(q: Queue, installation_id: int, owner: str, repo: str):
                     logger.debug(
                         "Backpressure active; deferring drain for %ss (installation=%s)", delay, installation_id
                     )
-                    asyncio.create_task(asyncio.sleep(delay))
                 # Release lock and exit; a subsequent webhook or scheduled re-run will resume
                 return
         # Drain until empty
@@ -157,6 +179,9 @@ async def _drain_repo(q: Queue, installation_id: int, owner: str, repo: str):
                         pass
 
                 ok, msg = process_item(gh, owner, repo, number, heartbeat=_heartbeat)
+            except asyncio.CancelledError:
+                # Propagate cancellation so uvicorn can shut down cleanly
+                raise
             except Exception as e:
                 # Treat as transient; requeue with backoff up to max_retries, then DLQ
                 retries = int(item.get("retries", 0) or 0)
@@ -269,8 +294,17 @@ async def webhook(
         touched.add((installation_id, owner, repo))
 
     # Trigger background drain per repo
+    def _track_task(coro):
+        t = asyncio.create_task(coro)
+        try:
+            request.app.state.background_tasks.add(t)
+        except Exception:
+            pass
+        t.add_done_callback(lambda _t: getattr(request.app.state, "background_tasks", set()).discard(_t))
+        return t
+
     for installation_id, owner, repo in touched:
-        asyncio.create_task(_drain_repo(q, installation_id, owner, repo))
+        _track_task(_drain_repo(q, installation_id, owner, repo))
 
     code = 202
     webhook_requests_total.labels(event=event, action=action, code=str(code)).inc()

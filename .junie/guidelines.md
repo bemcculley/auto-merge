@@ -29,6 +29,7 @@ Make sure to use `uv` and source the virtual environment before running local te
 ## Repository Policy (.github/automerge.yml in target repos)
 - Flat YAML k/v only. Recommended safe defaults:
   - `label: automerge`
+  - `require_label: true` (when false, the PR label is not required to automerge)
   - `merge_method: squash`
   - `require_up_to_date: true`
   - `update_branch: true`

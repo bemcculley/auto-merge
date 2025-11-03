@@ -28,6 +28,7 @@ class PullRequestRef(BaseModel):
 
 class Config(BaseModel):
     label: str = "automerge"
+    require_label: bool = True
     merge_method: Literal["squash", "rebase", "merge"] = "squash"
     update_branch: bool = True
     require_up_to_date: bool = True
