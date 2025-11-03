@@ -193,6 +193,43 @@ curl -X POST http://localhost:8080/webhook -d '{}' -H 'X-GitHub-Event: ping' -H 
 
 ## Testing
 
+### Pre-commit (local checks aligned with GitHub Actions)
+Pre-commit hooks enforce the same checks locally that run in CI (Ruff format/lint, yamllint). A pre-push hook runs the unit tests using uv.
+
+Setup once (using uv):
+
+```
+uv sync --extra dev
+pre-commit install                       # install default (commit) hooks
+pre-commit install --hook-type pre-push  # install pre-push tests hook
+```
+
+Run on all files manually (two equivalent options):
+
+```
+# Prefer letting pre-commit create hook envs with uv
+PRE_COMMIT_USE_UV=1 pre-commit run --all-files
+
+# or run pre-commit itself via uv (uses the project venv)
+uv run pre-commit run --all-files
+```
+
+Troubleshooting (Homebrew pre-commit):
+- If you see an error like `No module named virtualenv` from pre-commit trying to build hook envs, enable uv-backed env creation:
+  
+  `PRE_COMMIT_USE_UV=1 pre-commit run --all-files`
+  
+  or upgrade pre-commit to >= 3.6.0 and ensure `uv` is installed: `pip install uv`.
+
+Notes:
+- The commit hooks run:
+  - `ruff format` (apply formatting)
+  - `ruff check` (lint)
+  - `yamllint` (per .yamllint.yaml)
+  - basic hygiene checks (trailing whitespace, EOF fixer, merge conflicts, JSON/YAML syntax)
+- The pre-push hook runs: `uv run -m pytest -q`. Ensure dev deps are installed (via `uv sync --extra dev`).
+- CI mirrors these: see `.github/workflows/ruff.yml`, `.github/workflows/yamllint.yml`, `.github/workflows/ci.yml`, and `.github/workflows/pre-commit.yml`.
+
 Run unit tests:
 
 ```
