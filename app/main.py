@@ -202,7 +202,8 @@ async def _drain_repo(q: Queue, installation_id: int, owner: str, repo: str):
                         # Best-effort; ignore heartbeat errors
                         pass
 
-                ok, msg = process_item(gh, owner, repo, number, heartbeat=_heartbeat)
+                # Offload the synchronous worker to a thread to avoid blocking the event loop
+                ok, msg = await asyncio.to_thread(process_item, gh, owner, repo, number, heartbeat=_heartbeat)
             except asyncio.CancelledError:
                 # Propagate cancellation so uvicorn can shut down cleanly
                 raise

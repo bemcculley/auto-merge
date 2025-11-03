@@ -323,13 +323,20 @@ class GitHubClient:
 
     def are_checks_green(self, owner: str, repo: str, sha: str) -> bool:
         combined = self.get_combined_status(owner, repo, sha)
-        if combined.get("state") not in ("success", "neutral"):
-            return False
         suites = self.list_check_suites(owner, repo, sha)
-        for s in suites:
-            if s.get("conclusion") not in ("success", "neutral"):
-                return False
-        return True
+        statuses = combined.get("statuses") or []
+        # If no statuses and no suites, treat as not green unless policy elsewhere allows it
+        if not statuses and not suites:
+            return False
+        # If suites exist, they are authoritative
+        acceptable = {"success", "neutral", "skipped"}
+        if suites:
+            for s in suites:
+                if s.get("conclusion") not in acceptable:
+                    return False
+            return True
+        # Otherwise require combined status to be success/neutral
+        return combined.get("state") in ("success", "neutral")
 
     def update_branch(self, owner: str, repo: str, number: int) -> bool:
         r = self.request("PUT", f"/repos/{owner}/{repo}/pulls/{number}/update-branch")

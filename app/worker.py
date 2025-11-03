@@ -71,16 +71,26 @@ def are_checks_green(gh: GitHubClient, owner: str, repo: str, sha: str, cfg: Con
             cfg.allow_merge_when_no_checks,
         )
         return bool(cfg.allow_merge_when_no_checks)
-    # Otherwise require green/neutral across combined status and suites
+    # If check suites exist, their conclusions are authoritative; treat them as neutral/green when acceptable
+    acceptable = {"success", "neutral", "skipped"}
+    if suites:
+        for s in suites:
+            concl = s.get("conclusion")
+            if concl not in acceptable:
+                logger.debug(
+                    "Check suite not acceptable: conclusion=%s for %s/%s@%s",
+                    concl,
+                    owner,
+                    repo,
+                    sha,
+                )
+                return False
+        return True
+    # Otherwise (no suites), fall back to combined status
     state = combined.get("state")
     if state not in ("success", "neutral"):
         logger.debug("Combined status not green: state=%s for %s/%s@%s", state, owner, repo, sha)
         return False
-    for s in suites:
-        concl = s.get("conclusion")
-        if concl not in ("success", "neutral"):
-            logger.debug("Check suite not green: conclusion=%s for %s/%s@%s", concl, owner, repo, sha)
-            return False
     return True
 
 
@@ -119,27 +129,50 @@ def evaluate_mergeability(gh: GitHubClient, owner: str, repo: str, number: int, 
     return True, "mergeable", pr
 
 
-def wait_for_checks(
+def wait_for_checks_or_state_change(
     gh: GitHubClient,
     owner: str,
     repo: str,
-    sha: str,
+    number: int,
+    original_sha: str,
     cfg: Config,
     heartbeat: Optional[Callable[[], None]] = None,
-) -> bool:
+) -> tuple[str, Optional[str]]:
+    """
+    Poll for checks on original_sha, but also detect important state changes:
+    - PR closed/locked/draft → ("pr_state_changed", None)
+    - Head SHA changed (force-push) → ("head_changed", new_sha)
+    - Head missing (deleted branch) → ("head_missing", None)
+    - Checks green → ("ok", None)
+    - Deadline exceeded → ("timeout", None)
+    """
     deadline = time.time() + cfg.max_wait_minutes * 60
+    poll_sleep = max(5, cfg.poll_interval_seconds)
     while time.time() < deadline:
-        if are_checks_green(gh, owner, repo, sha, cfg):
-            return True
-        # Allow caller to refresh locks/heartbeat during long waits
+        # 1) If checks are green on the observed sha, we can proceed
+        if are_checks_green(gh, owner, repo, original_sha, cfg):
+            return "ok", None
+        # 2) Allow caller to refresh locks/heartbeat during long waits
         try:
             if heartbeat is not None:
                 heartbeat()
         except Exception:
             # Heartbeat failures should not break the wait loop
             pass
-        time.sleep(max(5, cfg.poll_interval_seconds))
-    return False
+        # 3) Re-fetch PR to see if state changed or head moved
+        pr = gh.get_pr(owner, repo, number)
+        if not pr:
+            return "pr_state_changed", None
+        if pr.get("draft") or pr.get("locked") or (pr.get("state") == "closed"):
+            return "pr_state_changed", None
+        head = pr.get("head") or {}
+        new_sha = head.get("sha")
+        if not new_sha:
+            return "head_missing", None
+        if new_sha != original_sha:
+            return "head_changed", new_sha
+        time.sleep(poll_sleep)
+    return "timeout", None
 
 
 def process_item(
@@ -169,16 +202,24 @@ def process_item(
             # Wait for checks
             head_sha = pr.get("head", {}).get("sha")
             with checks_wait_seconds.time():
-                ok_checks = wait_for_checks(gh, owner, repo, head_sha, cfg, heartbeat=heartbeat)
-            if not ok_checks:
+                status, new_sha = wait_for_checks_or_state_change(
+                    gh, owner, repo, number, head_sha, cfg, heartbeat=heartbeat
+                )
+            if status == "timeout":
                 logger.debug("Checks timeout after update for PR #%s", number)
                 return False, "checks_timeout"
-            # Re-evaluate
-            logger.debug("Re-evaluating PR #%s after branch update", number)
+            if status == "pr_state_changed":
+                logger.debug("PR state changed (closed/locked/draft) during wait for PR #%s", number)
+                return False, "pr_state_changed"
+            if status == "head_missing":
+                logger.debug("Head missing (deleted) during wait for PR #%s", number)
+                return False, "head_missing"
+            # status == ok or head_changed → re-evaluate current PR state
+            logger.debug("Re-evaluating PR #%s after branch update/wait (status=%s)", number, status)
             with worker_processing_seconds.labels(phase="evaluate", owner=owner, repo=repo).time():
                 ok, reason, pr = evaluate_mergeability(gh, owner, repo, number, cfg)
                 if not ok:
-                    logger.debug("PR #%s still not mergeable after update: %s", number, reason)
+                    logger.debug("PR #%s still not mergeable after update/wait: %s", number, reason)
                     return False, f"not_mergeable_after_update:{reason}"
         # If checks are not green (including race where checks haven't registered yet), wait and re-evaluate
         elif reason == "checks_not_green" and pr:
@@ -187,15 +228,21 @@ def process_item(
                 "Checks not green for PR #%s; waiting up to %sm for checks to pass", number, cfg.max_wait_minutes
             )
             with checks_wait_seconds.time():
-                ok_checks = wait_for_checks(gh, owner, repo, head_sha, cfg)
-            if not ok_checks:
+                status, new_sha = wait_for_checks_or_state_change(gh, owner, repo, number, head_sha, cfg)
+            if status == "timeout":
                 logger.debug("Checks timeout for PR #%s without branch update", number)
                 return False, "checks_timeout"
-            logger.debug("Re-evaluating PR #%s after checks became green", number)
+            if status == "pr_state_changed":
+                logger.debug("PR state changed (closed/locked/draft) while waiting for PR #%s", number)
+                return False, "pr_state_changed"
+            if status == "head_missing":
+                logger.debug("Head missing (deleted) while waiting for PR #%s", number)
+                return False, "head_missing"
+            logger.debug("Re-evaluating PR #%s after wait (status=%s)", number, status)
             with worker_processing_seconds.labels(phase="evaluate", owner=owner, repo=repo).time():
                 ok, reason, pr = evaluate_mergeability(gh, owner, repo, number, cfg)
                 if not ok:
-                    logger.debug("PR #%s still not mergeable after checks: %s", number, reason)
+                    logger.debug("PR #%s still not mergeable after checks/wait: %s", number, reason)
                     return False, f"not_mergeable_after_checks:{reason}"
         else:
             return False, reason
