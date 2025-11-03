@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 import hmac
 import hashlib
 import json
@@ -22,8 +24,6 @@ from .github import GitHubClient
 from .worker import process_item
 
 logger = logging.getLogger(__name__)
-
-from contextlib import asynccontextmanager
 
 
 @asynccontextmanager
