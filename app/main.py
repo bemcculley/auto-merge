@@ -26,6 +26,30 @@ from .worker import process_item
 logger = logging.getLogger(__name__)
 
 
+def _init_logging_once() -> None:
+    # Initialize root/app logging level based on LOG_LEVEL env/Settings.
+    # Keep idempotent to avoid duplicate handlers in test runs.
+    level_name = os.getenv("LOG_LEVEL", SETTINGS.log_level or "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    root = logging.getLogger()
+    # Set level regardless of handlers; uvicorn installs handlers itself.
+    root.setLevel(level)
+    # If no handlers (e.g., running under gunicorn/uvicorn minimal), attach a basic stream handler.
+    if not root.handlers:
+        handler = logging.StreamHandler()
+        fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+        handler.setFormatter(fmt)
+        root.addHandler(handler)
+    # Ensure our package logger follows the root level
+    logging.getLogger("app").setLevel(level)
+    # Make sure uvicorn loggers are not overly restrictive
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        logging.getLogger(name).setLevel(level)
+
+
+_init_logging_once()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Track background tasks so we can cancel on shutdown
@@ -277,8 +301,18 @@ async def webhook(
     if not identities:
         # For now, ignore non-PR webhook types; 202 Accepted
         code = 202
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "webhook.accepted: event=%s delivery=%s identities=0 note=non_pr_or_unresolvable",
+                event,
+                x_github_delivery,
+            )
         webhook_requests_total.labels(event=event, action=action, code=str(code)).inc()
-        return Response(status_code=code)
+        headers = {}
+        if logger.isEnabledFor(logging.DEBUG):
+            headers["X-Automerge-Identities"] = "0"
+            headers["X-Automerge-Note"] = "non_pr_or_unresolvable"
+        return Response(status_code=code, headers=headers)
 
     q = Queue()
     # Enqueue all identities (likely one for pull_request; possibly many for check_suite/status)
@@ -290,7 +324,30 @@ async def webhook(
         repo = identity["repo"]
         number = int(identity["number"])  # type: ignore
         sender = identity.get("sender")
-        q.enqueue(installation_id, owner, repo, number, sender)
+        enq_ok = q.enqueue(installation_id, owner, repo, number, sender)
+        depth = None
+        pos = None
+        try:
+            depth = q.get_depth(installation_id, owner, repo) if hasattr(q, "get_depth") else None
+            if enq_ok:
+                pos = depth  # newly enqueued at tail
+            else:
+                # deduped; try to find current position
+                pos = q.find_position(installation_id, owner, repo, number) if hasattr(q, "find_position") else None
+        except Exception:
+            pass
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "enqueue.%s: installation=%s owner=%s repo=%s pr=%s sender=%s queue_depth=%s position=%s",
+                "added" if enq_ok else "deduped",
+                installation_id,
+                owner,
+                repo,
+                number,
+                sender,
+                depth,
+                pos,
+            )
         touched.add((installation_id, owner, repo))
 
     # Trigger background drain per repo
@@ -307,5 +364,43 @@ async def webhook(
         _track_task(_drain_repo(q, installation_id, owner, repo))
 
     code = 202
+    headers = {}
+    if logger.isEnabledFor(logging.DEBUG):
+        # Log per-repo depths in summary (best-effort) and attach debug headers
+        try:
+            summary = []
+            headers["X-Automerge-Identities"] = str(len(identities))
+            headers["X-Automerge-Repos"] = str(len(touched))
+            for installation_id, owner, repo in touched:
+                d = q.get_depth(installation_id, owner, repo) if hasattr(q, "get_depth") else None
+                # Best-effort position when there was exactly one identity in this repo
+                pos = None
+                try:
+                    # If only one PR per repo in this event, we can compute its position
+                    if len([i for i in identities if i["owner"] == owner and i["repo"] == repo]) == 1:
+                        n = [i for i in identities if i["owner"] == owner and i["repo"] == repo][0]["number"]
+                        pos = (
+                            q.find_position(installation_id, owner, repo, int(n))
+                            if hasattr(q, "find_position")
+                            else None
+                        )
+                except Exception:
+                    pos = None
+                summary.append(f"{owner}/{repo} depth={d} pos={pos}")
+                # Header names must be token-safe; replace '/' with '__'
+                key_base = f"{owner}__{repo}"
+                headers[f"X-Automerge-{key_base}-Depth"] = str(d if d is not None else "")
+                if pos is not None and int(pos) > 0:
+                    headers[f"X-Automerge-{key_base}-Position"] = str(pos)
+            logger.debug(
+                "webhook.accepted: event=%s delivery=%s identities=%s repos=%s details=%s",
+                event,
+                x_github_delivery,
+                len(identities),
+                len(touched),
+                ", ".join(summary),
+            )
+        except Exception:
+            pass
     webhook_requests_total.labels(event=event, action=action, code=str(code)).inc()
-    return Response(status_code=code)
+    return Response(status_code=code, headers=headers)

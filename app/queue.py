@@ -30,6 +30,32 @@ class Queue:
     def __init__(self):
         self.r = redis.Redis.from_url(SETTINGS.redis_url, decode_responses=True)
 
+    def get_depth(self, installation_id: int, owner: str, repo: str) -> int:
+        """Return current queue length for the repo (best-effort)."""
+        q, _, _, _ = self._keys(installation_id, owner, repo)
+        try:
+            return int(self.r.llen(q))
+        except Exception:
+            return 0
+
+    def find_position(self, installation_id: int, owner: str, repo: str, number: int) -> int:
+        """Return 1-based position of PR number in the queue, or 0 if not found.
+        Uses LRANGE to avoid fetching the entire list in very large queues; capped for safety.
+        """
+        q, _, _, _ = self._keys(installation_id, owner, repo)
+        try:
+            # Fetch up to first 1000 items to bound cost; for larger queues, position beyond window returns 0.
+            items = self.r.lrange(q, 0, 999)
+            for idx, raw in enumerate(items):
+                try:
+                    if int(json.loads(raw).get("number")) == int(number):
+                        return idx + 1
+                except Exception:
+                    continue
+            return 0
+        except Exception:
+            return 0
+
     def requeue_tail(self, installation_id: int, owner: str, repo: str, item: dict) -> None:
         """Requeue item to tail immediately (used for starvation control)."""
         q, de, _, _ = self._keys(installation_id, owner, repo)
