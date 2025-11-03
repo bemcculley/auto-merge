@@ -3,7 +3,6 @@ import hashlib
 import json
 import os
 from fastapi.testclient import TestClient
-import types
 
 from app.main import app
 
