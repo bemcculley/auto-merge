@@ -15,6 +15,7 @@ from .metrics import (
     webhook_requests_total,
     webhook_invalid_signatures_total,
     webhook_parse_failures_total,
+    queue_starvation_total,
 )
 from .queue import Queue
 from .github import GitHubClient
@@ -127,7 +128,7 @@ async def _drain_repo(q: Queue, installation_id: int, owner: str, repo: str):
                 if delay > 0:
                     logger.debug("Backpressure active; deferring drain for %ss (installation=%s)", delay, installation_id)
                     asyncio.create_task(asyncio.sleep(delay))
-                    # Release lock and exit; a subsequent webhook or scheduled re-run will resume
+                # Release lock and exit; a subsequent webhook or scheduled re-run will resume
                 return
         # Drain until empty
         while True:
@@ -136,11 +137,46 @@ async def _drain_repo(q: Queue, installation_id: int, owner: str, repo: str):
                 logger.debug("Queue empty for %s/%s; stopping drain", owner, repo)
                 break
             number = int(item.get("number"))
+            start_ts = time.time()
             logger.debug("Processing queued PR #%s for %s/%s", number, owner, repo)
             gh = GitHubClient(installation_id)
-            ok, msg = process_item(gh, owner, repo, number)
+            try:
+                ok, msg = process_item(gh, owner, repo, number)
+            except Exception as e:
+                # Treat as transient; requeue with backoff up to max_retries, then DLQ
+                retries = int(item.get("retries", 0) or 0)
+                if retries + 1 >= SETTINGS.max_retries:
+                    q.send_to_dead_letter(installation_id, owner, repo, item)
+                else:
+                    q.requeue_with_backoff(installation_id, owner, repo, item)
+                logger.debug("Exception while processing PR #%s: %s; retries=%s", number, e, retries + 1)
+                # Refresh lock and continue
+                await asyncio.sleep(0)
+                if not q.refresh_lock(installation_id, owner, repo, worker_id):
+                    logger.debug("Lost lock while draining %s/%s; stopping", owner, repo)
+                    break
+                continue
             logger.debug("Result for PR #%s: ok=%s msg=%s", number, ok, msg)
-            # Continue regardless; processing result is logged via metrics
+            # Starvation control: if processing took too long and did not succeed, requeue to tail once
+            elapsed = time.time() - start_ts
+            if (not ok) and elapsed > SETTINGS.max_item_window_seconds:
+                queue_starvation_total.labels(owner=owner, repo=repo).inc()
+                # Requeue to tail without incrementing retries (policy choice)
+                q.requeue_tail(installation_id, owner, repo, item)
+            # If transient conditions like checks timeout/not yet green: requeue with backoff
+            elif not ok:
+                reason = str(msg or "")
+                transient = (
+                    reason.startswith("checks_timeout")
+                    or "checks_not_green" in reason
+                    or reason.startswith("failed_to_fetch")
+                )
+                if transient:
+                    retries = int(item.get("retries", 0) or 0)
+                    if retries + 1 >= SETTINGS.max_retries:
+                        q.send_to_dead_letter(installation_id, owner, repo, item)
+                    else:
+                        q.requeue_with_backoff(installation_id, owner, repo, item)
             # Sleep briefly to avoid hot looping
             await asyncio.sleep(0)
             # Refresh lock periodically

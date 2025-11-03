@@ -5,6 +5,7 @@ from typing import Any, Dict, Optional, Tuple, List
 import httpx
 import jwt
 from datetime import datetime, timedelta, timezone
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from .config import SETTINGS
 from .metrics import (
@@ -72,14 +73,55 @@ class GitHubClient:
     def request(self, method: str, path: str, params: Optional[Dict[str, Any]] = None, data: Optional[Any] = None) -> httpx.Response:
         url = path if path.startswith("http") else f"{self.base_url.rstrip('/')}/{path.lstrip('/')}"
         endpoint = f"{method} {path if path.startswith('/') else '/' + path}"
-        start = time.perf_counter()
-        resp = httpx.request(method, url, headers=self._headers(), params=params, json=data, timeout=60)
-        duration = time.perf_counter() - start
-        github_api_latency_seconds.labels(endpoint=endpoint).observe(duration)
-        github_api_requests_total.labels(endpoint=endpoint, status=str(resp.status_code)).inc()
-        # Update rate limit metrics and maybe throttle
-        self._handle_rate_limit(resp)
-        return resp
+
+        def should_retry(resp: Optional[httpx.Response], exc: Optional[Exception]) -> bool:
+            # Retry on network/timeout errors
+            if exc is not None:
+                return True
+            if resp is None:
+                return False
+            status = resp.status_code
+            # Respect backpressure already set by _handle_rate_limit; still retry a few times
+            # Retry on 5xx always; on 429/403 (rate limit/secondary) for idempotent requests only
+            idempotent = method.upper() in ("GET", "PUT") and not endpoint.endswith("/merge")
+            if status >= 500:
+                return True
+            if status in (429, 403) and idempotent:
+                return True
+            return False
+
+        attempts = 0
+        last_exc: Optional[Exception] = None
+        while True:
+            attempts += 1
+            start = time.perf_counter()
+            exc: Optional[Exception] = None
+            resp: Optional[httpx.Response] = None
+            try:
+                resp = httpx.request(method, url, headers=self._headers(), params=params, json=data, timeout=60)
+            except (httpx.TimeoutException, httpx.TransportError) as e:
+                exc = e
+            duration = time.perf_counter() - start
+            status_label = str(resp.status_code) if resp is not None else "exc"
+            github_api_latency_seconds.labels(endpoint=endpoint).observe(duration)
+            github_api_requests_total.labels(endpoint=endpoint, status=status_label).inc()
+            if resp is not None:
+                self._handle_rate_limit(resp)
+            if not should_retry(resp, exc) or attempts >= 3:
+                if exc is not None:
+                    # Synthesize a Response-like object on exception by raising or return a dummy response
+                    # We raise to let callers decide.
+                    last_exc = exc
+                    break
+                return resp  # type: ignore
+            # sleep with exponential backoff
+            sleep_s = min(SETTINGS.backoff_base_seconds * (SETTINGS.backoff_factor ** (attempts - 1)), SETTINGS.max_backoff_seconds)
+            time.sleep(sleep_s)
+        # If we exit loop due to exception after retries, raise it
+        if last_exc:
+            raise last_exc
+        # Fallback (should not happen)
+        return resp  # type: ignore
 
     def _handle_rate_limit(self, resp: httpx.Response) -> None:
         try:

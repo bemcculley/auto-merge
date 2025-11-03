@@ -11,6 +11,7 @@ from .metrics import (
     merge_attempts_total,
     merges_success_total,
     merges_failed_total,
+    merge_blocked_total,
 )
 
 logger = logging.getLogger(__name__)
@@ -92,6 +93,9 @@ def evaluate_mergeability(gh: GitHubClient, owner: str, repo: str, number: int, 
 
     # Up-to-date requirement
     if cfg.require_up_to_date and mergeable_state in ("behind", "blocked"):
+        # visibility metric: blocked may indicate reviews or protections
+        if mergeable_state == "blocked":
+            merge_blocked_total.labels(reason="reviews_or_protection").inc()
         return False, f"behind_or_blocked:{mergeable_state}", pr
 
     # Checks must be green
@@ -164,23 +168,42 @@ def process_item(gh: GitHubClient, owner: str, repo: str, number: int) -> Tuple[
         else:
             return False, reason
 
+    # Before merging, re-fetch PR to ensure state didn't change
+    latest = gh.get_pr(owner, repo, number)
+    if not latest or latest.get("draft") or latest.get("locked") or not any(l["name"] == cfg.label for l in (latest.get("labels") or [])) or latest.get("mergeable") is False:
+        return False, "state_changed_or_not_mergeable"
+
     # Merge now
+    def _esc(s: str | None) -> str:
+        x = s or ""
+        return x.replace("{", "{{").replace("}", "}}")
+
     method = cfg.merge_method
-    title = cfg.title_template.format(
-        number=number,
-        title=pr.get("title", f"PR #{number}"),
-        head=pr.get("head", {}).get("ref"),
-        base=pr.get("base", {}).get("ref"),
-        user=(pr.get("user") or {}).get("login"),
-    )
-    body = cfg.body_template.format(
-        number=number,
-        body=pr.get("body") or "",
-        title=pr.get("title", f"PR #{number}"),
-        head=pr.get("head", {}).get("ref"),
-        base=pr.get("base", {}).get("ref"),
-        user=(pr.get("user") or {}).get("login"),
-    )
+    try:
+        raw_title = cfg.title_template.format(
+            number=number,
+            title=_esc(latest.get("title", f"PR #{number}")),
+            head=_esc((latest.get("head", {}) or {}).get("ref")),
+            base=_esc((latest.get("base", {}) or {}).get("ref")),
+            user=_esc(((latest.get("user") or {}) or {}).get("login")),
+        )
+    except KeyError:
+        raw_title = f"PR #{number}"
+    # Truncate title to 255 chars
+    title = (raw_title or "")[:255]
+
+    try:
+        body = cfg.body_template.format(
+            number=number,
+            body=_esc(latest.get("body") or ""),
+            title=_esc(latest.get("title", f"PR #{number}")),
+            head=_esc((latest.get("head", {}) or {}).get("ref")),
+            base=_esc((latest.get("base", {}) or {}).get("ref")),
+            user=_esc(((latest.get("user") or {}) or {}).get("login")),
+        )
+    except KeyError:
+        body = f"Auto-merged by Auto Merge Bot for PR #{number}"
+
     logger.debug("Merging PR #%s for %s/%s with method=%s", number, owner, repo, method)
     with worker_processing_seconds.labels(phase="merge", owner=owner, repo=repo).time():
         ok, msg = gh.merge_pr(owner, repo, number, method, title, body)
