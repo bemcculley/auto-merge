@@ -216,9 +216,9 @@ uv run pre-commit run --all-files
 
 Troubleshooting (Homebrew pre-commit):
 - If you see an error like `No module named virtualenv` from pre-commit trying to build hook envs, enable uv-backed env creation:
-  
+
   `PRE_COMMIT_USE_UV=1 pre-commit run --all-files`
-  
+
   or upgrade pre-commit to >= 3.6.0 and ensure `uv` is installed: `pip install uv`.
 
 Notes:

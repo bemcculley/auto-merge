@@ -1,6 +1,4 @@
 import os
-import time
-from typing import Optional
 from prometheus_client import CollectorRegistry, CONTENT_TYPE_LATEST, generate_latest, Counter, Gauge, Histogram
 
 try:

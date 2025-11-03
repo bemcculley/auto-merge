@@ -1,6 +1,6 @@
 import time
 import logging
-from typing import Tuple
+from typing import Tuple, Callable, Optional
 
 from .github import GitHubClient
 from .models import Config
@@ -93,7 +93,7 @@ def evaluate_mergeability(gh: GitHubClient, owner: str, repo: str, number: int, 
         return False, "draft", pr
     if pr.get("locked"):
         return False, "locked", pr
-    if not any(l["name"] == label for l in pr.get("labels", [])):
+    if not any(lbl["name"] == label for lbl in pr.get("labels", [])):
         return False, "missing_label", pr
 
     mergeable_state = pr.get("mergeable_state")  # clean, unstable, blocked, behind, dirty, unknown
@@ -117,16 +117,36 @@ def evaluate_mergeability(gh: GitHubClient, owner: str, repo: str, number: int, 
     return True, "mergeable", pr
 
 
-def wait_for_checks(gh: GitHubClient, owner: str, repo: str, sha: str, cfg: Config) -> bool:
+def wait_for_checks(
+    gh: GitHubClient,
+    owner: str,
+    repo: str,
+    sha: str,
+    cfg: Config,
+    heartbeat: Optional[Callable[[], None]] = None,
+) -> bool:
     deadline = time.time() + cfg.max_wait_minutes * 60
     while time.time() < deadline:
         if are_checks_green(gh, owner, repo, sha, cfg):
             return True
+        # Allow caller to refresh locks/heartbeat during long waits
+        try:
+            if heartbeat is not None:
+                heartbeat()
+        except Exception:
+            # Heartbeat failures should not break the wait loop
+            pass
         time.sleep(max(5, cfg.poll_interval_seconds))
     return False
 
 
-def process_item(gh: GitHubClient, owner: str, repo: str, number: int) -> Tuple[bool, str]:
+def process_item(
+    gh: GitHubClient,
+    owner: str,
+    repo: str,
+    number: int,
+    heartbeat: Optional[Callable[[], None]] = None,
+) -> Tuple[bool, str]:
     logger.debug("Loading config for %s/%s", owner, repo)
     cfg = load_config(gh, owner, repo)
     logger.debug("Evaluating PR #%s for %s/%s with cfg=%s", number, owner, repo, cfg.model_dump())
@@ -147,7 +167,7 @@ def process_item(gh: GitHubClient, owner: str, repo: str, number: int) -> Tuple[
             # Wait for checks
             head_sha = pr.get("head", {}).get("sha")
             with checks_wait_seconds.time():
-                ok_checks = wait_for_checks(gh, owner, repo, head_sha, cfg)
+                ok_checks = wait_for_checks(gh, owner, repo, head_sha, cfg, heartbeat=heartbeat)
             if not ok_checks:
                 logger.debug("Checks timeout after update for PR #%s", number)
                 return False, "checks_timeout"
@@ -184,7 +204,7 @@ def process_item(gh: GitHubClient, owner: str, repo: str, number: int) -> Tuple[
         not latest
         or latest.get("draft")
         or latest.get("locked")
-        or not any(l["name"] == cfg.label for l in (latest.get("labels") or []))
+        or not any(lbl["name"] == cfg.label for lbl in (latest.get("labels") or []))
         or latest.get("mergeable") is False
     ):
         return False, "state_changed_or_not_mergeable"

@@ -148,7 +148,14 @@ async def _drain_repo(q: Queue, installation_id: int, owner: str, repo: str):
             logger.debug("Processing queued PR #%s for %s/%s", number, owner, repo)
             gh = GitHubClient(installation_id)
             try:
-                ok, msg = process_item(gh, owner, repo, number)
+                # Heartbeat function to refresh the per-repo lock during long waits
+                def _heartbeat() -> None:
+                    try:
+                        q.refresh_lock(installation_id, owner, repo, worker_id)
+                    except Exception:
+                        # Best-effort; ignore heartbeat errors
+                        pass
+                ok, msg = process_item(gh, owner, repo, number, heartbeat=_heartbeat)
             except Exception as e:
                 # Treat as transient; requeue with backoff up to max_retries, then DLQ
                 retries = int(item.get("retries", 0) or 0)

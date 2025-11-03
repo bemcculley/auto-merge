@@ -1,11 +1,9 @@
 import time
-import json
 import base64
 from typing import Any, Dict, Optional, Tuple, List
 import httpx
 import jwt
 from datetime import datetime, timedelta, timezone
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from .config import SETTINGS
 from .metrics import (
@@ -198,8 +196,7 @@ class GitHubClient:
 
     def list_prs_for_commit(self, owner: str, repo: str, sha: str) -> List[Dict[str, Any]]:
         """List pull requests associated with a commit SHA."""
-        headers_preview = {"Accept": "application/vnd.github+json"}
-        # GitHub supports this endpoint without preview headers now; keeping generic Accept
+        # GitHub supports this endpoint without preview headers now
         r = self.request("GET", f"/repos/{owner}/{repo}/commits/{sha}/pulls")
         if r.status_code == 200:
             try:
@@ -223,7 +220,7 @@ class GitHubClient:
             r = self.request("GET", f"/repos/{owner}/{repo}/pulls", params=params)
             if r.status_code != 200:
                 break
-            batch = [p for p in r.json() if any(l["name"] == label for l in p.get("labels", []))]
+            batch = [p for p in r.json() if any(lbl["name"] == label for lbl in p.get("labels", []))]
             prs.extend(batch)
             if len(r.json()) < 100:
                 break

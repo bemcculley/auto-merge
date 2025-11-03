@@ -1,5 +1,4 @@
 from app.worker import process_item
-from app.models import Config
 
 
 class GHBase:

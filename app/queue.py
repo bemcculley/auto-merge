@@ -16,7 +16,6 @@ from .metrics import (
     redis_latency_seconds,
     worker_lock_acquired_total,
     worker_lock_failed_total,
-    worker_lock_lost_total,
     worker_active,
     backpressure_active,
     queue_dead_letter_total,
